@@ -1,7 +1,7 @@
 /**
  * server.js
  * Twilio (Call) → Media Stream (WS) → Deepgram (STT)
- * → GPT → Twilio <Say> → loop
+ * → GPT → Twilio <Say> → LOOP CONTINU
  */
 
 require("dotenv").config();
@@ -80,10 +80,13 @@ app.post("/voice", (req, res) => {
 
   vr.say(
     { voice: "alice" },
-    "Hello, this is Ava. Please speak after the beep."
+    "Hello, this is Ava. You can speak naturally, I am listening."
   );
 
+  // 🔁 START STREAM ONCE
   vr.start().stream({ url: wsUrl() });
+
+  // 🔒 KEEP CALL OPEN
   vr.pause({ length: 600 });
 
   res.type("text/xml").send(vr.toString());
@@ -100,7 +103,7 @@ async function askGPT(text) {
       {
         role: "system",
         content:
-          "You are Ava, a professional phone assistant. Detect language and reply briefly.",
+          "You are Ava, a professional phone assistant. Detect language (FR/EN) and reply briefly, naturally, one sentence.",
       },
       { role: "user", content: text },
     ],
@@ -134,7 +137,12 @@ wss.on("connection", (ws) => {
 
     try {
       const vr = new VoiceResponse();
+
       vr.say({ voice: "alice" }, text);
+
+      // 🔁 CRITICAL: RE-OPEN STREAM AFTER SPEAKING
+      vr.start().stream({ url: wsUrl() });
+      vr.pause({ length: 600 });
 
       await twilioClient.calls(callSid).update({
         twiml: vr.toString(),
@@ -153,6 +161,7 @@ wss.on("connection", (ws) => {
     sample_rate: 8000,
     interim_results: true,
     vad_events: true,
+    endpointing: 300,
   });
 
   dg.on(LiveTranscriptionEvents.Transcript, (data) => {
@@ -170,6 +179,7 @@ wss.on("connection", (ws) => {
       if (finalText.length < MIN_CHARS) return;
 
       console.log("🧠 User:", finalText);
+
       const reply = await askGPT(finalText);
       console.log("🤖 Ava:", reply);
 
