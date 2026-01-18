@@ -10,13 +10,10 @@ const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 const twilio = require('twilio');
-const fetch = require('node-fetch');
 const fs = require('fs');
 const path = require('path');
 const { createClient, LiveTranscriptionEvents } = require('@deepgram/sdk');
 const OpenAI = require('openai');
-
-
 
 /* =========================
    ENV
@@ -105,7 +102,7 @@ async function getGPTReply(text) {
 }
 
 /* =========================
-   ELEVENLABS TTS
+   ELEVENLABS TTS (FETCH NATIF)
 ========================= */
 async function synthesizeSpeech(text, callSid) {
   const audioPath = path.join('/tmp', `${callSid}.mp3`);
