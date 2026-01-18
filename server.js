@@ -1,6 +1,6 @@
 /**
  * server.js
- * Twilio → Media Stream → Deepgram → GPT → Voice response
+ * Twilio → Media Stream → Deepgram → GPT → Voice
  */
 
 require('dotenv').config();
@@ -9,7 +9,6 @@ const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 const twilio = require('twilio');
-const { twiml } = twilio;
 const { createClient, LiveTranscriptionEvents } = require('@deepgram/sdk');
 const OpenAI = require('openai');
 
@@ -23,21 +22,16 @@ const wss = new WebSocket.Server({ server, path: '/ws' });
 /* =======================
    Clients
 ======================= */
-const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
 const twilioClient = twilio(
   process.env.TWILIO_ACCOUNT_SID,
   process.env.TWILIO_AUTH_TOKEN
 );
 
-/* =======================
-   Globals (simple state)
-======================= */
-let CURRENT_CALL_SID = null;
+const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 /* =======================
    Middlewares
@@ -49,42 +43,42 @@ app.use(express.json());
    Health check
 ======================= */
 app.get('/', (req, res) => {
-  res.send('Twilio Deepgram Server is running');
+  res.send('Twilio Deepgram Server running');
 });
 
 /* ==========================================================
-   1. Twilio Webhook — Answer Call
+   1. Twilio Webhook — MUST RESPOND FAST
 ========================================================== */
 app.post('/twilio-webhook', (req, res) => {
-  console.log('Incoming Twilio call');
+  const VoiceResponse = twilio.twiml.VoiceResponse;
+  const response = new VoiceResponse();
 
-  const response = new twiml.VoiceResponse();
+  response.say('Hello, this is Ava. Please hold.');
 
-  const gather = response.gather({
-    input: 'dtmf',
-    numDigits: 1,
-    timeout: 5,
-    action: '/gather-response',
-    method: 'POST',
-  });
+  response.pause({ length: 1 });
 
-  gather.say(
-    'Hi, this is Ava, your virtual assistant. Press any key to start speaking.'
+  response.redirect(
+    { method: 'POST' },
+    '/gather-response'
   );
 
-  res.type('text/xml').send(response.toString());
+  res
+    .status(200)
+    .type('text/xml')
+    .send(response.toString());
 });
 
 /* ==========================================================
-   2. Start Media Stream
+   2. Gather → Start Media Stream
 ========================================================== */
 app.post('/gather-response', (req, res) => {
-  CURRENT_CALL_SID = req.body.CallSid;
-  console.log('Key pressed, starting media stream');
-  console.log('CallSid:', CURRENT_CALL_SID);
+  const VoiceResponse = twilio.twiml.VoiceResponse;
+  const response = new VoiceResponse();
 
-  const response = new twiml.VoiceResponse();
-  const streamUrl = `wss://${process.env.RENDER_EXTERNAL_URL}/ws`;
+  const callSid = req.body.CallSid;
+  console.log('Starting media stream for CallSid:', callSid);
+
+  const streamUrl = `wss://${process.env.RENDER_EXTERNAL_URL}/ws?callSid=${callSid}`;
 
   response.start().stream({
     url: streamUrl,
@@ -94,47 +88,46 @@ app.post('/gather-response', (req, res) => {
   response.say('You can start speaking now.');
   response.pause({ length: 60 });
 
-  res.type('text/xml').send(response.toString());
+  res
+    .status(200)
+    .type('text/xml')
+    .send(response.toString());
 });
 
 /* ==========================================================
-   3. WebSocket — Media Stream → Deepgram → GPT
+   3. WebSocket — Media Stream → Deepgram → GPT → Twilio
 ========================================================== */
-wss.on('connection', (ws) => {
-  console.log('Media stream connected');
+wss.on('connection', (ws, req) => {
+  const params = new URLSearchParams(req.url.replace('/ws?', ''));
+  const callSid = params.get('callSid');
 
-  let hasReplied = false;
+  console.log('WebSocket connected for CallSid:', callSid);
 
-  const dgConnection = deepgram.listen.live({
+  let replied = false;
+
+  const dg = deepgram.listen.live({
     model: 'nova-3',
     language: 'en-US',
     punctuate: true,
-    interim_results: true,
+    interim_results: false,
     encoding: 'mulaw',
     sample_rate: 8000,
     channels: 1,
   });
 
-  let dgReady = false;
-  const audioQueue = [];
-
-  dgConnection.on(LiveTranscriptionEvents.Open, () => {
+  dg.on(LiveTranscriptionEvents.Open, () => {
     console.log('Deepgram connected');
-    dgReady = true;
-
-    while (audioQueue.length > 0) {
-      dgConnection.send(audioQueue.shift());
-    }
   });
 
-  dgConnection.on(LiveTranscriptionEvents.Transcript, async (data) => {
+  dg.on(LiveTranscriptionEvents.Transcript, async (data) => {
+    if (replied) return;
+
     const transcript =
-      data.channel?.alternatives?.[0]?.transcript;
+      data?.channel?.alternatives?.[0]?.transcript;
 
-    if (!transcript || transcript.length < 4) return;
-    if (hasReplied) return;
+    if (!transcript || transcript.length < 3) return;
 
-    hasReplied = true;
+    replied = true;
     console.log('Transcript:', transcript);
 
     try {
@@ -144,7 +137,7 @@ wss.on('connection', (ws) => {
           {
             role: 'system',
             content:
-              'You are Ava, a professional and friendly real estate assistant.',
+              'You are Ava, a friendly and professional real estate assistant.',
           },
           { role: 'user', content: transcript },
         ],
@@ -154,29 +147,22 @@ wss.on('connection', (ws) => {
       const reply = completion.choices[0].message.content.trim();
       console.log('GPT reply:', reply);
 
-      if (!CURRENT_CALL_SID) {
-        console.error('No CallSid available');
-        return;
-      }
-
-      const twimlResponse = `
+      const twiml = `
 <Response>
   <Say voice="alice">${reply}</Say>
   <Pause length="60"/>
 </Response>
 `;
 
-      await twilioClient.calls(CURRENT_CALL_SID).update({
-        twiml: twimlResponse,
-      });
+      await twilioClient.calls(callSid).update({ twiml });
 
-      console.log('Response sent to Twilio');
+      console.log('Twilio response sent');
     } catch (err) {
-      console.error('GPT or Twilio error:', err.message);
+      console.error('GPT/Twilio error:', err.message);
     }
   });
 
-  dgConnection.on(LiveTranscriptionEvents.Error, (err) => {
+  dg.on(LiveTranscriptionEvents.Error, (err) => {
     console.error('Deepgram error:', err);
   });
 
@@ -189,19 +175,20 @@ wss.on('connection', (ws) => {
     }
 
     if (data.event === 'media') {
-      const audio = Buffer.from(data.media.payload, 'base64');
-
-      if (dgReady) dgConnection.send(audio);
-      else audioQueue.push(audio);
+      const audio = Buffer.from(
+        data.media.payload,
+        'base64'
+      );
+      dg.send(audio);
     }
 
     if (data.event === 'stop') {
-      dgConnection.finish();
+      dg.finish();
     }
   });
 
   ws.on('close', () => {
-    dgConnection.finish();
+    dg.finish();
   });
 });
 
