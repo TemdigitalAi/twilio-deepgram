@@ -80,51 +80,33 @@ app.get('/', (req, res) => {
 });
 
 /* ==========================================================
-   1️⃣ /voice — ENTRYPOINT DE L’APPEL
+   /voice
 ========================================================== */
 app.post('/voice', (req, res) => {
-  const baseUrl = getPublicBaseUrl();
-
-  console.log('🔥 /voice HIT from Twilio');
-  console.log('From:', req.body.From, 'To:', req.body.To);
-
   const vr = new VoiceResponse();
 
   const gather = vr.gather({
     input: 'dtmf',
     numDigits: 1,
     timeout: 8,
-    action: `${baseUrl}/gather-response`,
+    action: `${getPublicBaseUrl()}/gather-response`,
     method: 'POST',
   });
 
-  gather.say(
-    { voice: 'alice' },
-    'Hello, this is Ava. Press any key to start talking.'
-  );
-
-  // si aucune touche
-  vr.redirect({ method: 'POST' }, `${baseUrl}/voice`);
+  gather.say({ voice: 'alice' }, 'Hello, this is Ava. Press any key to start talking.');
+  vr.redirect({ method: 'POST' }, `${getPublicBaseUrl()}/voice`);
 
   res.type('text/xml').send(vr.toString());
 });
 
 /* ==========================================================
-   2️⃣ /gather-response — START MEDIA STREAM
+   /gather-response
 ========================================================== */
 app.post('/gather-response', (req, res) => {
-  const baseUrl = getPublicBaseUrl();
-  const wsUrl = getWsUrl();
-
-  console.log('🎯 DTMF received → starting media stream');
-  console.log('🎧 WS URL:', wsUrl);
-
   const vr = new VoiceResponse();
-
-  vr.start().stream({ url: wsUrl });
+  vr.start().stream({ url: getWsUrl() });
   vr.say({ voice: 'alice' }, 'You may begin speaking now.');
   vr.pause({ length: 600 });
-
   res.type('text/xml').send(vr.toString());
 });
 
@@ -140,7 +122,7 @@ async function getGPTReply(text) {
         {
           role: 'system',
           content:
-            "You are Ava, a professional assistant. Detect language (FR/EN) and reply briefly.",
+            'You are Ava, a professional assistant. Detect language (FR/EN) and reply briefly.',
         },
         { role: 'user', content: text },
       ],
@@ -154,18 +136,19 @@ async function getGPTReply(text) {
 }
 
 /* ==========================================================
-   3️⃣ MEDIA STREAM → DEEPGRAM → GPT → TWILIO
+   MEDIA STREAM
 ========================================================== */
 wss.on('connection', (ws) => {
   console.log('🔌 Media Stream connected');
 
   let callSid = null;
   let bufferText = '';
-  let lastTranscriptAt = Date.now();
   let isUpdatingCall = false;
   let silenceTimer = null;
 
-  const SILENCE_MS = 900;
+  // ✅ STABILITÉ CONVERSATION
+  const SILENCE_MS = 1800;
+  const MIN_CHARS = 3;
 
   function resetSilenceTimer(cb) {
     if (silenceTimer) clearTimeout(silenceTimer);
@@ -183,7 +166,7 @@ wss.on('connection', (ws) => {
 
       await twilioClient.calls(callSid).update({ twiml: vr.toString() });
     } finally {
-      setTimeout(() => (isUpdatingCall = false), 400);
+      setTimeout(() => (isUpdatingCall = false), 1200);
     }
   }
 
@@ -199,37 +182,31 @@ wss.on('connection', (ws) => {
 
   dg.on(LiveTranscriptionEvents.Transcript, (data) => {
     const transcript = data?.channel?.alternatives?.[0]?.transcript;
-    if (!transcript) return;
+    if (!transcript || !data.is_final) return;
 
-    if (data.is_final) {
-      bufferText += ' ' + transcript;
-      resetSilenceTimer(async () => {
-        const text = bufferText.trim();
-        bufferText = '';
-        if (!text) return;
-        console.log('🧠 User said:', text);
-        const reply = await getGPTReply(text);
-        console.log('🤖 Ava:', reply);
-        await speak(reply);
-      });
-    }
+    bufferText += ' ' + transcript;
+
+    resetSilenceTimer(async () => {
+      const text = bufferText.trim();
+      bufferText = '';
+
+      if (!text || text.length < MIN_CHARS) return;
+
+      console.log('🧠 User:', text);
+      const reply = await getGPTReply(text);
+      console.log('🤖 Ava:', reply);
+      await speak(reply);
+    });
   });
 
   ws.on('message', (msg) => {
     const data = JSON.parse(msg);
-    if (data.event === 'start') {
-      callSid = data.start.callSid;
-      console.log('▶️ Call SID:', callSid);
-    }
-    if (data.event === 'media') {
+    if (data.event === 'start') callSid = data.start.callSid;
+    if (data.event === 'media')
       dg.send(Buffer.from(data.media.payload, 'base64'));
-    }
   });
 
-  ws.on('close', () => {
-    console.log('🔒 WS closed');
-    dg.finish();
-  });
+  ws.on('close', () => dg.finish());
 });
 
 /* =========================
