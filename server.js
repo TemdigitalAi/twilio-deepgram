@@ -1,6 +1,7 @@
 /**
  * server.js
- * Twilio (call) → DTMF → Media Stream (WS) → Deepgram (STT) → GPT → Twilio (Say) → loop
+ * Twilio (call) → DTMF → Media Stream (WS) → Deepgram (STT)
+ * → GPT → Twilio <Say> → loop
  */
 
 require('dotenv').config();
@@ -29,7 +30,7 @@ if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) throw new Error('Missing TWILIO c
 if (!TWILIO_PHONE_NUMBER) throw new Error('Missing TWILIO_PHONE_NUMBER');
 if (!DEEPGRAM_API_KEY) throw new Error('Missing DEEPGRAM_API_KEY');
 if (!OPENAI_API_KEY) throw new Error('Missing OPENAI_API_KEY');
-if (!RENDER_EXTERNAL_URL) throw new Error('Missing RENDER_EXTERNAL_URL (must be https://...)');
+if (!RENDER_EXTERNAL_URL) throw new Error('Missing RENDER_EXTERNAL_URL');
 
 /* =========================
    CLIENTS
@@ -53,8 +54,9 @@ app.use(express.json());
    HELPERS
 ========================= */
 function getPublicBaseUrl() {
-  // Must be like https://twilio-deepgram-v1ay.onrender.com
-  return RENDER_EXTERNAL_URL.startsWith('http') ? RENDER_EXTERNAL_URL : `https://${RENDER_EXTERNAL_URL}`;
+  return RENDER_EXTERNAL_URL.startsWith('http')
+    ? RENDER_EXTERNAL_URL
+    : `https://${RENDER_EXTERNAL_URL}`;
 }
 
 function getWsUrl() {
@@ -63,7 +65,6 @@ function getWsUrl() {
   return `wss://${host}/ws`;
 }
 
-// Simple SSML escape for Twilio <Say>
 function escapeForSay(text) {
   return String(text)
     .replace(/&/g, '&amp;')
@@ -72,245 +73,162 @@ function escapeForSay(text) {
 }
 
 /* =========================
-   HEALTH CHECK
+   HEALTH
 ========================= */
 app.get('/', (req, res) => {
   res.send('✅ Twilio + Deepgram + GPT server is live');
 });
 
 /* ==========================================================
-   1) /voice — Call entrypoint (agent speaks first, asks to press key)
-   (Works for inbound OR outbound calls. For outbound: calls.create(url=/voice))
+   1️⃣ /voice — ENTRYPOINT DE L’APPEL
 ========================================================== */
 app.post('/voice', (req, res) => {
-  console.log('📞 Call started → /voice');
+  const baseUrl = getPublicBaseUrl();
 
-  const response = new VoiceResponse();
+  console.log('🔥 /voice HIT from Twilio');
+  console.log('From:', req.body.From, 'To:', req.body.To);
 
-  const gather = response.gather({
+  const vr = new VoiceResponse();
+
+  const gather = vr.gather({
     input: 'dtmf',
     numDigits: 1,
     timeout: 8,
-    action: '/gather-response',
+    action: `${baseUrl}/gather-response`,
     method: 'POST',
   });
 
-  gather.say({ voice: 'alice' }, "Hello, this is Ava. Press any key to start talking.");
+  gather.say(
+    { voice: 'alice' },
+    'Hello, this is Ava. Press any key to start talking.'
+  );
 
-  // If no key pressed, repeat
-  response.redirect({ method: 'POST' }, '/voice');
+  // si aucune touche
+  vr.redirect({ method: 'POST' }, `${baseUrl}/voice`);
 
-  res.type('text/xml').send(response.toString());
+  res.type('text/xml').send(vr.toString());
 });
 
 /* ==========================================================
-   2) /gather-response — Start Media Stream after key press
+   2️⃣ /gather-response — START MEDIA STREAM
 ========================================================== */
 app.post('/gather-response', (req, res) => {
-  console.log('🎯 DTMF received → starting stream');
-
-  const response = new VoiceResponse();
+  const baseUrl = getPublicBaseUrl();
   const wsUrl = getWsUrl();
 
-  response.start().stream({ url: wsUrl });
+  console.log('🎯 DTMF received → starting media stream');
+  console.log('🎧 WS URL:', wsUrl);
 
-  response.say({ voice: 'alice' }, 'You may begin speaking now.');
-  response.pause({ length: 600 });
+  const vr = new VoiceResponse();
 
-  res.type('text/xml').send(response.toString());
+  vr.start().stream({ url: wsUrl });
+  vr.say({ voice: 'alice' }, 'You may begin speaking now.');
+  vr.pause({ length: 600 });
+
+  res.type('text/xml').send(vr.toString());
 });
 
 /* ==========================================================
-   3) GPT helper — auto language response + concise
+   GPT
 ========================================================== */
-async function getGPTReply(userText) {
+async function getGPTReply(text) {
   try {
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o',
-      temperature: 0.5,
+      temperature: 0.4,
       messages: [
         {
           role: 'system',
-          content: [
-            "You are Ava, a helpful and professional real-estate assistant.",
-            "RULES:",
-            "1) Detect the user's language (French or English) and reply in the same language.",
-            "2) Keep replies short for phone calls (1–2 sentences).",
-            "3) Ask 1 question at a time.",
-          ].join('\n'),
+          content:
+            "You are Ava, a professional assistant. Detect language (FR/EN) and reply briefly.",
         },
-        { role: 'user', content: userText },
+        { role: 'user', content: text },
       ],
     });
 
-    return completion.choices?.[0]?.message?.content?.trim() || "Sorry, can you repeat that?";
+    return completion.choices[0].message.content.trim();
   } catch (err) {
     console.error('❌ GPT Error:', err.message);
-    return "Sorry, can you repeat that?";
+    return 'Sorry, can you repeat that?';
   }
 }
 
 /* ==========================================================
-   4) WS — Twilio → Deepgram → (end-of-utterance) → GPT → Twilio Say → loop
+   3️⃣ MEDIA STREAM → DEEPGRAM → GPT → TWILIO
 ========================================================== */
 wss.on('connection', (ws) => {
-  console.log('🔌 Media Stream connected (/ws)');
+  console.log('🔌 Media Stream connected');
 
-  const baseUrl = getPublicBaseUrl();
   let callSid = null;
-
-  // --- Utterance buffering ---
   let bufferText = '';
   let lastTranscriptAt = Date.now();
-
-  // Controls to avoid talking over itself
   let isUpdatingCall = false;
-
-  // Silence / end-of-phrase tuning
-  const SILENCE_MS = 900;     // if no transcript for 0.9s → consider phrase ended
-  const MIN_CHARS = 3;        // ignore very tiny noises
-  const MAX_UTTERANCE_CHARS = 500;
-
-  // Fallback timer if DG doesn't send utterance-end events
   let silenceTimer = null;
 
-  function resetSilenceTimer(onSilence) {
+  const SILENCE_MS = 900;
+
+  function resetSilenceTimer(cb) {
     if (silenceTimer) clearTimeout(silenceTimer);
-    silenceTimer = setTimeout(onSilence, SILENCE_MS);
+    silenceTimer = setTimeout(cb, SILENCE_MS);
   }
 
-  async function speakReplyInCall(reply) {
-    if (!callSid) return;
-    if (isUpdatingCall) return;
+  async function speak(reply) {
+    if (!callSid || isUpdatingCall) return;
 
     isUpdatingCall = true;
     try {
       const vr = new VoiceResponse();
       vr.say({ voice: 'alice' }, escapeForSay(reply));
-
-      // Restart loop: require keypress again? (NO) — we continue automatically
-      // We redirect to /gather-response to re-open Media Stream after speaking.
-      vr.redirect({ method: 'POST' }, `${baseUrl}/gather-response`);
+      vr.redirect({ method: 'POST' }, `${getPublicBaseUrl()}/gather-response`);
 
       await twilioClient.calls(callSid).update({ twiml: vr.toString() });
-    } catch (err) {
-      console.error('❌ Twilio calls.update error:', err.message);
     } finally {
-      // small cooldown to avoid rapid updates
-      setTimeout(() => { isUpdatingCall = false; }, 350);
+      setTimeout(() => (isUpdatingCall = false), 400);
     }
   }
 
-  async function finalizeUtteranceAndRespond(reason = 'silence') {
-    const text = bufferText.trim();
-    bufferText = '';
-
-    if (!text || text.length < MIN_CHARS) return;
-
-    console.log(`🧠 Utterance finalized (${reason}):`, text);
-
-    const reply = await getGPTReply(text);
-    console.log('🤖 GPT Reply:', reply);
-
-    await speakReplyInCall(reply);
-  }
-
-  // Deepgram live
   const dg = deepgram.listen.live({
     model: 'nova-3',
-    // "multi" gives better chance for FR/EN without hardcoding, if supported
-    // If your DG account rejects "multi", change to 'en-US' or 'fr'
     language: 'multi',
-    smart_format: true,
-    punctuate: true,
-    interim_results: true,
     encoding: 'mulaw',
     sample_rate: 8000,
-    channels: 1,
-
-    // These help end-of-utterance detection (if supported on your plan/model)
+    interim_results: true,
     vad_events: true,
     endpointing: 300,
   });
 
-  dg.on(LiveTranscriptionEvents.Open, () => {
-    console.log('✅ Deepgram connected');
-  });
+  dg.on(LiveTranscriptionEvents.Transcript, (data) => {
+    const transcript = data?.channel?.alternatives?.[0]?.transcript;
+    if (!transcript) return;
 
-  // If SDK exposes UtteranceEnd, we use it; otherwise fallback timer handles it.
-  if (LiveTranscriptionEvents.UtteranceEnd) {
-    dg.on(LiveTranscriptionEvents.UtteranceEnd, async () => {
-      await finalizeUtteranceAndRespond('dg_utterance_end');
-    });
-  }
-
-  dg.on(LiveTranscriptionEvents.Transcript, async (data) => {
-    try {
-      const alt = data?.channel?.alternatives?.[0];
-      const transcript = alt?.transcript || '';
-      const isFinal = data?.is_final === true;
-
-      if (!transcript) return;
-
-      lastTranscriptAt = Date.now();
-
-      // Build buffer: we add finals strongly; interims are optional but helpful
-      if (isFinal) {
-        bufferText += (bufferText ? ' ' : '') + transcript.trim();
-        if (bufferText.length > MAX_UTTERANCE_CHARS) {
-          bufferText = bufferText.slice(-MAX_UTTERANCE_CHARS);
-        }
-        console.log('📝 Final:', transcript.trim());
-      } else {
-        // you can log interims if you want:
-        // console.log('… interim:', transcript.trim());
-      }
-
+    if (data.is_final) {
+      bufferText += ' ' + transcript;
       resetSilenceTimer(async () => {
-        // If enough time passed since last transcript → treat as end of phrase
-        const now = Date.now();
-        if (now - lastTranscriptAt >= SILENCE_MS) {
-          await finalizeUtteranceAndRespond('silence_timer');
-        }
+        const text = bufferText.trim();
+        bufferText = '';
+        if (!text) return;
+        console.log('🧠 User said:', text);
+        const reply = await getGPTReply(text);
+        console.log('🤖 Ava:', reply);
+        await speak(reply);
       });
-    } catch (err) {
-      console.error('❌ Transcript handler error:', err);
     }
-  });
-
-  dg.on('error', (err) => {
-    console.error('❌ Deepgram error:', err);
   });
 
   ws.on('message', (msg) => {
-    let data;
-    try {
-      data = JSON.parse(msg);
-    } catch {
-      return;
-    }
-
+    const data = JSON.parse(msg);
     if (data.event === 'start') {
-      callSid = data?.start?.callSid || null;
-      console.log('▶️ Stream started | Call SID:', callSid);
+      callSid = data.start.callSid;
+      console.log('▶️ Call SID:', callSid);
     }
-
     if (data.event === 'media') {
-      const audio = Buffer.from(data.media.payload, 'base64');
-      dg.send(audio);
-    }
-
-    if (data.event === 'stop') {
-      console.log('⛔ Stream stopped by Twilio');
-      try { dg.finish(); } catch {}
-      if (silenceTimer) clearTimeout(silenceTimer);
+      dg.send(Buffer.from(data.media.payload, 'base64'));
     }
   });
 
   ws.on('close', () => {
     console.log('🔒 WS closed');
-    try { dg.finish(); } catch {}
-    if (silenceTimer) clearTimeout(silenceTimer);
+    dg.finish();
   });
 });
 
