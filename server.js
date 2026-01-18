@@ -1,6 +1,6 @@
 /**
  * server.js
- * Twilio → Media Stream → Deepgram → GPT → Voice
+ * Twilio → Media Stream → Deepgram → GPT → Voice response
  */
 
 require('dotenv').config();
@@ -43,49 +43,27 @@ app.use(express.json());
    Health check
 ======================= */
 app.get('/', (req, res) => {
-  res.send('Twilio Deepgram Server running');
+  res.send('✅ Twilio Deepgram Voice Agent running');
 });
 
 /* ==========================================================
-   1. Twilio Webhook — MUST RESPOND FAST
+   1️⃣ Twilio Webhook — ANSWER CALL (FAST RESPONSE)
 ========================================================== */
 app.post('/twilio-webhook', (req, res) => {
   const VoiceResponse = twilio.twiml.VoiceResponse;
   const response = new VoiceResponse();
 
-  response.say('Hello, this is Ava. Please hold.');
+  const streamUrl = `wss://${process.env.RENDER_EXTERNAL_URL}/ws`;
 
-  response.pause({ length: 1 });
-
-  response.redirect(
-    { method: 'POST' },
-    '/gather-response'
+  response.say(
+    'Hello, this is Ava, your virtual assistant. You can start speaking now.'
   );
-
-  res
-    .status(200)
-    .type('text/xml')
-    .send(response.toString());
-});
-
-/* ==========================================================
-   2. Gather → Start Media Stream
-========================================================== */
-app.post('/gather-response', (req, res) => {
-  const VoiceResponse = twilio.twiml.VoiceResponse;
-  const response = new VoiceResponse();
-
-  const callSid = req.body.CallSid;
-  console.log('Starting media stream for CallSid:', callSid);
-
-  const streamUrl = `wss://${process.env.RENDER_EXTERNAL_URL}/ws?callSid=${callSid}`;
 
   response.start().stream({
     url: streamUrl,
     track: 'inbound',
   });
 
-  response.say('You can start speaking now.');
   response.pause({ length: 60 });
 
   res
@@ -95,15 +73,14 @@ app.post('/gather-response', (req, res) => {
 });
 
 /* ==========================================================
-   3. WebSocket — Media Stream → Deepgram → GPT → Twilio
+   2️⃣ WebSocket — Media Stream → Deepgram → GPT → Twilio
 ========================================================== */
-wss.on('connection', (ws, req) => {
-  const params = new URLSearchParams(req.url.replace('/ws?', ''));
-  const callSid = params.get('callSid');
+wss.on('connection', (ws) => {
+  console.log('🔌 Media stream connected');
 
-  console.log('WebSocket connected for CallSid:', callSid);
-
+  let callSid = null;
   let replied = false;
+  let dgReady = false;
 
   const dg = deepgram.listen.live({
     model: 'nova-3',
@@ -116,7 +93,8 @@ wss.on('connection', (ws, req) => {
   });
 
   dg.on(LiveTranscriptionEvents.Open, () => {
-    console.log('Deepgram connected');
+    dgReady = true;
+    console.log('✅ Deepgram connected');
   });
 
   dg.on(LiveTranscriptionEvents.Transcript, async (data) => {
@@ -128,7 +106,7 @@ wss.on('connection', (ws, req) => {
     if (!transcript || transcript.length < 3) return;
 
     replied = true;
-    console.log('Transcript:', transcript);
+    console.log('📝 Transcript:', transcript);
 
     try {
       const completion = await openai.chat.completions.create({
@@ -145,7 +123,12 @@ wss.on('connection', (ws, req) => {
       });
 
       const reply = completion.choices[0].message.content.trim();
-      console.log('GPT reply:', reply);
+      console.log('🤖 GPT reply:', reply);
+
+      if (!callSid) {
+        console.error('❌ Missing CallSid, cannot respond');
+        return;
+      }
 
       const twiml = `
 <Response>
@@ -155,15 +138,14 @@ wss.on('connection', (ws, req) => {
 `;
 
       await twilioClient.calls(callSid).update({ twiml });
-
-      console.log('Twilio response sent');
+      console.log('📞 Voice response sent to Twilio');
     } catch (err) {
-      console.error('GPT/Twilio error:', err.message);
+      console.error('❌ GPT / Twilio error:', err.message);
     }
   });
 
   dg.on(LiveTranscriptionEvents.Error, (err) => {
-    console.error('Deepgram error:', err);
+    console.error('❌ Deepgram error:', err);
   });
 
   ws.on('message', (msg) => {
@@ -174,7 +156,12 @@ wss.on('connection', (ws, req) => {
       return;
     }
 
-    if (data.event === 'media') {
+    if (data.event === 'start') {
+      callSid = data.start.callSid;
+      console.log('📞 CallSid:', callSid);
+    }
+
+    if (data.event === 'media' && dgReady) {
       const audio = Buffer.from(
         data.media.payload,
         'base64'
@@ -193,10 +180,10 @@ wss.on('connection', (ws, req) => {
 });
 
 /* ==========================================================
-   4. Start Server
+   3️⃣ Start Server
 ========================================================== */
 const PORT = process.env.PORT || 10000;
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server listening on port ${PORT}`);
+  console.log(`✅ Server listening on port ${PORT}`);
 });
