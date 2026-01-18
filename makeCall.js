@@ -1,46 +1,50 @@
 /**
  * makeCall.js
- * Déclenche un appel sortant Twilio (CLI ONLY)
+ * Responsible ONLY for initiating an outbound Twilio call
  */
 
 require('dotenv').config();
 const twilio = require('twilio');
 
-const client = twilio(
-  process.env.TWILIO_ACCOUNT_SID,
-  process.env.TWILIO_AUTH_TOKEN
-);
+const {
+  TWILIO_ACCOUNT_SID,
+  TWILIO_AUTH_TOKEN,
+  TWILIO_PHONE_NUMBER,
+  RENDER_EXTERNAL_URL,
+} = process.env;
 
-const TO = process.argv[2];
-const FROM = process.env.TWILIO_PHONE_NUMBER;
-const WEBHOOK = `https://${process.env.RENDER_EXTERNAL_URL}/twilio-webhook`;
-
-if (!TO) {
-  console.error('❌ Usage: node makeCall.js +15145551234');
-  process.exit(1);
+if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
+  throw new Error('❌ Missing Twilio credentials');
+}
+if (!TWILIO_PHONE_NUMBER) {
+  throw new Error('❌ Missing TWILIO_PHONE_NUMBER');
+}
+if (!RENDER_EXTERNAL_URL) {
+  throw new Error('❌ Missing RENDER_EXTERNAL_URL');
 }
 
-if (!FROM) {
-  console.error('❌ Missing TWILIO_PHONE_NUMBER');
-  process.exit(1);
+const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+
+/**
+ * Initiates a call
+ * @param {string} toNumber - E.164 format (ex: +14388361014)
+ */
+async function makeCall(toNumber) {
+  const baseUrl = RENDER_EXTERNAL_URL.startsWith('http')
+    ? RENDER_EXTERNAL_URL
+    : `https://${RENDER_EXTERNAL_URL}`;
+
+  console.log(`📞 Calling ${toNumber} from ${TWILIO_PHONE_NUMBER}`);
+
+  const call = await client.calls.create({
+    to: toNumber,
+    from: TWILIO_PHONE_NUMBER,
+    url: `${baseUrl}/voice`, // 👈 CRITICAL: entrypoint in server.js
+    method: 'POST',
+  });
+
+  console.log('✅ Call initiated. Call SID:', call.sid);
+  return call.sid;
 }
 
-console.log('📞 Calling:', TO);
-console.log('📤 From:', FROM);
-console.log('🌐 Webhook:', WEBHOOK);
-
-(async () => {
-  try {
-    const call = await client.calls.create({
-      to: TO,
-      from: FROM,
-      url: WEBHOOK,
-      method: 'POST',
-    });
-
-    console.log('✅ Call initiated');
-    console.log('Call SID:', call.sid);
-  } catch (err) {
-    console.error('❌ Twilio error:', err.message);
-  }
-})();
+module.exports = makeCall;

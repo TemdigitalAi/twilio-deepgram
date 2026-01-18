@@ -1,10 +1,10 @@
 // getContacts.js
-// Simule un contact venant de GHL / CRM
 
+// This function simulates pulling a contact from GHL (or any CRM)
 async function getGHLContacts() {
   return {
-    name: 'Adity Test',
-    phone: '+14388361014' // ⚠️ Numéro vérifié Twilio
+    name: 'Test Contact',
+    phone: '+14388361014' // Replace this later with dynamic logic
   };
 }
 
