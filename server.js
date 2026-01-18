@@ -80,7 +80,7 @@ app.get('/', (req, res) => {
 });
 
 /* ==========================================================
-   /voice
+   /voice — Entrée de l’appel
 ========================================================== */
 app.post('/voice', (req, res) => {
   const vr = new VoiceResponse();
@@ -93,20 +93,25 @@ app.post('/voice', (req, res) => {
     method: 'POST',
   });
 
-  gather.say({ voice: 'alice' }, 'Hello, this is Ava. Press any key to start talking.');
-  vr.redirect({ method: 'POST' }, `${getPublicBaseUrl()}/voice`);
+  gather.say(
+    { voice: 'alice' },
+    'Hello, this is Ava. Press any key to start talking.'
+  );
 
+  vr.redirect({ method: 'POST' }, `${getPublicBaseUrl()}/voice`);
   res.type('text/xml').send(vr.toString());
 });
 
 /* ==========================================================
-   /gather-response
+   /gather-response — START STREAM (sans parler)
 ========================================================== */
 app.post('/gather-response', (req, res) => {
   const vr = new VoiceResponse();
+
+  // ⚠️ IMPORTANT : on ne parle plus ici
   vr.start().stream({ url: getWsUrl() });
-  vr.say({ voice: 'alice' }, 'You may begin speaking now.');
   vr.pause({ length: 600 });
+
   res.type('text/xml').send(vr.toString());
 });
 
@@ -136,7 +141,7 @@ async function getGPTReply(text) {
 }
 
 /* ==========================================================
-   MEDIA STREAM
+   MEDIA STREAM → DEEPGRAM → GPT → TWILIO
 ========================================================== */
 wss.on('connection', (ws) => {
   console.log('🔌 Media Stream connected');
@@ -146,8 +151,8 @@ wss.on('connection', (ws) => {
   let isUpdatingCall = false;
   let silenceTimer = null;
 
-  // ✅ STABILITÉ CONVERSATION
-  const SILENCE_MS = 1800;
+  // 🔧 réglages stabilité
+  const SILENCE_MS = 1500;
   const MIN_CHARS = 3;
 
   function resetSilenceTimer(cb) {
@@ -162,9 +167,13 @@ wss.on('connection', (ws) => {
     try {
       const vr = new VoiceResponse();
       vr.say({ voice: 'alice' }, escapeForSay(reply));
-      vr.redirect({ method: 'POST' }, `${getPublicBaseUrl()}/gather-response`);
+      // ⚠️ PAS de redirect ici → évite les coupures
 
-      await twilioClient.calls(callSid).update({ twiml: vr.toString() });
+      await twilioClient.calls(callSid).update({
+        twiml: vr.toString(),
+      });
+    } catch (err) {
+      console.error('❌ Twilio update error:', err.message);
     } finally {
       setTimeout(() => (isUpdatingCall = false), 1200);
     }
@@ -193,20 +202,31 @@ wss.on('connection', (ws) => {
       if (!text || text.length < MIN_CHARS) return;
 
       console.log('🧠 User:', text);
+
       const reply = await getGPTReply(text);
       console.log('🤖 Ava:', reply);
+
       await speak(reply);
     });
   });
 
   ws.on('message', (msg) => {
     const data = JSON.parse(msg);
-    if (data.event === 'start') callSid = data.start.callSid;
-    if (data.event === 'media')
+
+    if (data.event === 'start') {
+      callSid = data.start.callSid;
+      console.log('▶️ Call SID:', callSid);
+    }
+
+    if (data.event === 'media') {
       dg.send(Buffer.from(data.media.payload, 'base64'));
+    }
   });
 
-  ws.on('close', () => dg.finish());
+  ws.on('close', () => {
+    console.log('🔒 WS closed');
+    dg.finish();
+  });
 });
 
 /* =========================
