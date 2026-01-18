@@ -15,6 +15,9 @@ const fs = require('fs');
 const path = require('path');
 const { createClient, LiveTranscriptionEvents } = require('@deepgram/sdk');
 const OpenAI = require('openai');
+const fetch = (...args) =>
+  import('node-fetch').then(({ default: fetch }) => fetch(...args));
+
 
 /* =========================
    ENV
