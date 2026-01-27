@@ -19,6 +19,7 @@ const WebSocket = require("ws");
 const twilio = require("twilio");
 const { createClient, LiveTranscriptionEvents } = require("@deepgram/sdk");
 const OpenAI = require("openai");
+const fs = require("fs");
 
 /* =========================
    ENV VALIDATION
@@ -228,7 +229,8 @@ async function textToSpeech(text) {
   try {
     console.log(`   🔊 Generating TTS for: "${text}"`);
 
-    const response = await fetch("https://api.deepgram.com/v1/speak?model=aura-asteria-en", {
+    // Request audio in PCM WAV format (16-bit, 16000 Hz)
+    const response = await fetch("https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=linear16&sample_rate=16000", {
       method: "POST",
       headers: {
         "Authorization": `Token ${DEEPGRAM_API_KEY}`,
@@ -253,20 +255,52 @@ async function textToSpeech(text) {
 }
 
 /* =========================
+   PCM TO MULAW CONVERSION
+========================= */
+function pcmToMulaw(pcmBuffer) {
+  const pcmBytes = new Int16Array(pcmBuffer.buffer);
+  const mulawBytes = new Uint8Array(pcmBytes.length);
+  
+  for (let i = 0; i < pcmBytes.length; i++) {
+    const pcm = pcmBytes[i];
+    const mulaw = linearToMulaw(pcm);
+    mulawBytes[i] = mulaw;
+  }
+  
+  return Buffer.from(mulawBytes);
+}
+
+function linearToMulaw(pcmValue) {
+  const BIAS = 0x84;
+  const MAX_MULAW = 0xFF;
+  let sign = pcmValue < 0 ? 0 : 0x80;
+  if (sign !== 0) pcmValue = -pcmValue;
+  pcmValue = Math.min(pcmValue, 32635);
+  let exponent = 7;
+  for (let expMask = 0x4000; pcmValue < expMask && exponent > 0; exponent--, expMask >>= 1);
+  let mantissa = (pcmValue >> (exponent + 3)) & 0x0F;
+  let mulaw = ~(sign | (exponent << 4) | mantissa) & MAX_MULAW;
+  return mulaw;
+}
+
+/* =========================
    SEND AUDIO TO TWILIO
 ========================= */
 async function sendAudioToTwilio(audioBuffer, ws, streamSid) {
   try {
-    // Twilio expects mulaw audio at 8000 Hz
-    // Deepgram returns audio that needs conversion
+    // Skip WAV header (44 bytes) if present
+    let pcmData = audioBuffer;
+    if (audioBuffer.length > 44 && audioBuffer.toString('utf8', 0, 4) === 'RIFF') {
+      pcmData = audioBuffer.slice(44);
+    }
+
+    // Convert PCM to Mulaw
+    const mulawBuffer = pcmToMulaw(pcmData);
+    const base64Audio = mulawBuffer.toString("base64");
     
-    // For now, we'll send the audio as-is
-    // In production, you might need PCM -> mulaw conversion
+    // Send in 160-byte chunks (20ms of mulaw at 8000 Hz)
+    const chunkSize = 320; // 160 bytes encoded in base64 = ~320 chars
     
-    const base64Audio = audioBuffer.toString("base64");
-    const chunkSize = 160; // 20ms chunks for mulaw
-    
-    // Split into chunks
     for (let i = 0; i < base64Audio.length; i += chunkSize) {
       const chunk = base64Audio.slice(i, i + chunkSize);
       
@@ -280,11 +314,11 @@ async function sendAudioToTwilio(audioBuffer, ws, streamSid) {
       
       ws.send(JSON.stringify(message));
       
-      // Small delay to simulate real-time playback
+      // 20ms delay between chunks for proper playback timing
       await new Promise(resolve => setTimeout(resolve, 20));
     }
     
-    console.log("   ✅ Audio sent to Twilio");
+    console.log(`   ✅ Audio sent to Twilio (${mulawBuffer.length} bytes mulaw)`);
 
   } catch (error) {
     console.error("❌ Error sending audio:", error.message);
