@@ -79,10 +79,10 @@ async function makeCall(toPhone) {
   
   const voiceUrl = `${baseUrl}/voice`;
 
-  console.log('📞 Creating call...');
-  console.log('FROM (Twilio):', TWILIO_PHONE_NUMBER);
-  console.log('TO (Client):', formattedPhone);
-  console.log('VOICE URL:', voiceUrl);
+  console.log('📞 Création de l\'appel...');
+  console.log('DE (Twilio):', TWILIO_PHONE_NUMBER);
+  console.log('VERS (Client):', formattedPhone);
+  console.log('WEBHOOK:', voiceUrl);
 
   try {
     const call = await client.calls.create({
@@ -91,30 +91,34 @@ async function makeCall(toPhone) {
       url: voiceUrl,
       method: 'POST',
       timeout: 60,
+      statusCallback: `${baseUrl}/call-status`,
+      statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+      statusCallbackMethod: 'POST',
     });
 
-    console.log('✅ Call created successfully');
+    console.log('✅ Appel créé avec succès');
     console.log('📡 Call SID:', call.sid);
-    console.log('📊 Status:', call.status);
+    console.log('📊 Statut:', call.status);
 
     return call.sid;
 
   } catch (err) {
-    console.error('❌ Twilio call failed');
+    console.error('❌ Échec de l\'appel Twilio');
     console.error('Message:', err.message);
     if (err.code) {
-      console.error('Twilio error code:', err.code);
+      console.error('Code d\'erreur Twilio:', err.code);
       
       // Messages d'erreur courants
       const errorMessages = {
-        20003: 'Authentification échouée',
+        20003: 'Authentification échouée - Vérifiez vos identifiants Twilio',
         21212: 'Le numéro ne peut pas recevoir d\'appels',
-        21214: 'Numéro invalide',
-        21217: 'Numéro non vérifié (compte trial Twilio)',
+        21214: 'Numéro invalide - Vérifiez le format (+1XXXXXXXXXX)',
+        21217: 'Numéro non vérifié (compte trial Twilio) - Ajoutez le numéro dans la console Twilio',
+        21608: 'Le numéro Twilio n\'existe pas ou n\'est pas actif',
       };
       
       if (errorMessages[err.code]) {
-        console.error('Info:', errorMessages[err.code]);
+        console.error('ℹ️  Info:', errorMessages[err.code]);
       }
     }
     throw err;
@@ -125,4 +129,3 @@ async function makeCall(toPhone) {
    EXPORT
 ========================= */
 module.exports = makeCall;
-

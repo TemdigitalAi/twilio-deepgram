@@ -10,16 +10,23 @@
  */
 async function getGHLContacts() {
   // TODO: Intégrer l'API GHL ici
-  // const response = await fetch('https://rest.gohighlevel.com/v1/contacts/', {
-  //   headers: { 'Authorization': `Bearer ${process.env.GHL_API_KEY}` }
-  // });
-  // const contacts = await response.json();
-  // return contacts[0];
+  // Exemple d'intégration GHL:
+  /*
+  const fetch = require('node-fetch');
+  const response = await fetch('https://rest.gohighlevel.com/v1/contacts/', {
+    headers: { 
+      'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
+      'Content-Type': 'application/json'
+    }
+  });
+  const data = await response.json();
+  return data.contacts[0]; // Retourner le premier contact
+  */
 
   // Pour l'instant, retourner un contact de test
   return {
-    name: 'Test Contact',
-    phone: '+14388361014', // Remplace par ton numéro pour tester
+    name: 'Contact Test',
+    phone: '+14388361014', // ⚠️ REMPLACE PAR TON NUMÉRO POUR TESTER
     source: 'Test manuel',
     notes: 'Contact de test pour validation du système'
   };

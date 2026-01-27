@@ -1,7 +1,7 @@
 /**
  * server.js
- * VOICE AGENT EN TEMPS RÉEL — TWILIO + DEEPGRAM + GPT
- * Gère la conversation fluide avec détection de silence
+ * AGENT VOCAL FONCTIONNEL — Conversation bidirectionnelle fluide
+ * Twilio Media Stream → Deepgram WebSocket STT (avec VAD) → GPT → Deepgram TTS → Twilio
  */
 
 require("dotenv").config();
@@ -44,13 +44,6 @@ app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
 /* =========================
-   CONFIGURATION
-========================= */
-const SILENCE_THRESHOLD = 0.01; // Seuil de détection de silence
-const SILENCE_DURATION = 1500; // ms avant de considérer que l'utilisateur a fini de parler
-const MIN_SPEECH_DURATION = 500; // ms minimum pour considérer que c'est de la parole
-
-/* =========================
    AUDIO DIR
 ========================= */
 const AUDIO_DIR = path.join(__dirname, "audio");
@@ -73,10 +66,9 @@ app.post("/voice", (req, res) => {
     numDigits: 1,
     action: "/start",
     method: "POST",
-    timeout: 10,
   });
 
-  gather.say({ voice: "alice", language: "en-US" }, "Hello. Press any key to start your conversation.");
+  gather.say({ voice: "alice", language: "fr-FR" }, "Bonjour. Appuyez sur n'importe quelle touche pour commencer.");
 
   res.type("text/xml").send(vr.toString());
 });
@@ -84,293 +76,199 @@ app.post("/voice", (req, res) => {
 app.post("/start", (req, res) => {
   const vr = new twilio.twiml.VoiceResponse();
 
-  vr.say({ voice: "alice", language: "en-US" }, "How can I help you today?");
+  vr.say({ voice: "alice", language: "fr-FR" }, "Comment puis-je vous aider aujourd'hui?");
   vr.start().stream({ url: `${baseUrl().replace("https", "wss")}/ws` });
-  vr.pause({ length: 3600 }); // Pause longue pour maintenir la connexion
+  vr.pause({ length: 60 });
 
   res.type("text/xml").send(vr.toString());
 });
 
 /* =========================
-   GPT
+   GPT — Historique de conversation
 ========================= */
-async function askGPT(text, conversationHistory = []) {
-  const messages = [
-    {
-      role: "system",
-      content: "You are a helpful real estate assistant. Keep responses concise and natural. Ask follow-up questions when appropriate."
-    },
-    ...conversationHistory,
-    { role: "user", content: text }
-  ];
+const conversationHistory = new Map(); // callSid -> messages[]
+
+async function askGPT(text, callSid) {
+  // Initialiser l'historique si nécessaire
+  if (!conversationHistory.has(callSid)) {
+    conversationHistory.set(callSid, [
+      {
+        role: "system",
+        content: "Tu es un assistant immobilier professionnel et amical. Pose des questions courtes et claires. Réponds de manière concise et naturelle."
+      }
+    ]);
+  }
+
+  const history = conversationHistory.get(callSid);
+  
+  // Ajouter le message de l'utilisateur
+  history.push({ role: "user", content: text });
 
   const r = await openai.chat.completions.create({
     model: "gpt-4o",
     temperature: 0.7,
-    max_tokens: 150,
-    messages: messages,
+    max_tokens: 100,
+    messages: history,
   });
+
+  const reply = r.choices[0].message.content.trim();
   
-  return r.choices[0].message.content.trim();
-}
+  // Ajouter la réponse de l'assistant
+  history.push({ role: "assistant", content: reply });
 
-/* =========================
-   DEEPGRAM HTTP STT
-========================= */
-async function deepgramSTT(audioBuffer) {
-  try {
-    const r = await fetch(
-      "https://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&language=en-US&model=nova-2",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Token ${DEEPGRAM_API_KEY}`,
-          "Content-Type": "audio/mulaw",
-        },
-        body: audioBuffer,
-      }
-    );
-
-    if (!r.ok) {
-      console.error("Deepgram STT error:", await r.text());
-      return "";
-    }
-
-    const j = await r.json();
-    return j.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
-  } catch (error) {
-    console.error("Deepgram STT exception:", error);
-    return "";
-  }
+  return reply;
 }
 
 /* =========================
    DEEPGRAM TTS
 ========================= */
 async function deepgramTTS(text, callSid) {
-  try {
-    const file = `${callSid}-${Date.now()}.wav`;
-    const filePath = path.join(AUDIO_DIR, file);
+  const file = `${callSid}-${Date.now()}.wav`;
+  const filePath = path.join(AUDIO_DIR, file);
 
-    const r = await fetch(
-      "https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=linear16&sample_rate=16000",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Token ${DEEPGRAM_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ text }),
-      }
-    );
-
-    if (!r.ok) {
-      console.error("Deepgram TTS error:", await r.text());
-      return null;
+  const r = await fetch(
+    "https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=mulaw&sample_rate=8000&container=wav",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Token ${DEEPGRAM_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ text }),
     }
+  );
 
-    fs.writeFileSync(filePath, Buffer.from(await r.arrayBuffer()));
-    return `${baseUrl()}/audio/${file}`;
-  } catch (error) {
-    console.error("Deepgram TTS exception:", error);
-    return null;
+  if (!r.ok) {
+    throw new Error(`Deepgram TTS failed: ${r.status}`);
   }
+
+  fs.writeFileSync(filePath, Buffer.from(await r.arrayBuffer()));
+  return `${baseUrl()}/audio/${file}`;
 }
 
 /* =========================
-   ANALYSE AUDIO POUR SILENCE
-========================= */
-function detectSilence(audioBuffer) {
-  try {
-    // Convertir le buffer μ-law en PCM pour analyse
-    const pcmData = mulawToPcm(audioBuffer);
-    
-    // Calculer l'énergie moyenne
-    let sum = 0;
-    for (let i = 0; i < pcmData.length; i++) {
-      sum += Math.abs(pcmData[i]);
-    }
-    const avgEnergy = sum / pcmData.length;
-    
-    return avgEnergy < SILENCE_THRESHOLD;
-  } catch (error) {
-    console.error("Silence detection error:", error);
-    return false;
-  }
-}
-
-function mulawToPcm(buffer) {
-  const pcm = new Int16Array(buffer.length);
-  for (let i = 0; i < buffer.length; i++) {
-    const mu = buffer[i];
-    const sign = (mu & 0x80) ? -1 : 1;
-    const magnitude = mu & 0x7F;
-    pcm[i] = sign * (Math.exp(magnitude / 16.0) - 1) * 32767 / (Math.exp(7.5) - 1);
-  }
-  return pcm;
-}
-
-/* =========================
-   WS MEDIA STREAM - VERSION FONCTIONNELLE
+   WS MEDIA STREAM avec Deepgram WebSocket STT
 ========================= */
 wss.on("connection", (ws) => {
+  console.log("📞 Nouvelle connexion WebSocket");
+  
   let callSid = null;
-  let audioChunks = [];
-  let lastSpeechTime = Date.now();
-  let isSpeaking = false;
-  let conversationHistory = [];
-  let processing = false;
-  let silenceTimer = null;
+  let deepgramWs = null;
+  let isProcessing = false; // Empêcher les réponses multiples simultanées
+  let streamSid = null;
 
-  console.log("🔌 WebSocket connected");
+  // Connexion à Deepgram WebSocket pour STT en temps réel
+  function connectDeepgram() {
+    const dgUrl = "wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&language=fr&punctuate=true&interim_results=false&endpointing=300&utterance_end_ms=1000";
+    
+    deepgramWs = new WebSocket(dgUrl, {
+      headers: {
+        Authorization: `Token ${DEEPGRAM_API_KEY}`,
+      },
+    });
 
+    deepgramWs.on("open", () => {
+      console.log("✅ Deepgram WebSocket connecté");
+    });
+
+    deepgramWs.on("message", async (data) => {
+      try {
+        const result = JSON.parse(data);
+        
+        // Vérifier si c'est une transcription finale
+        if (result.type === "Results" && result.channel?.alternatives?.[0]?.transcript) {
+          const transcript = result.channel.alternatives[0].transcript.trim();
+          
+          // Ignorer les transcriptions vides ou trop courtes
+          if (!transcript || transcript.length < 2) return;
+          
+          // Vérifier si c'est la fin d'un énoncé (speech_final)
+          if (result.speech_final && !isProcessing) {
+            isProcessing = true;
+            console.log("🧠 USER:", transcript);
+
+            try {
+              // Obtenir la réponse de GPT
+              const reply = await askGPT(transcript, callSid);
+              console.log("🤖 AGENT:", reply);
+
+              // Générer l'audio TTS
+              const audioUrl = await deepgramTTS(reply, callSid);
+
+              // Envoyer l'audio à Twilio via TwiML
+              await twilioClient.calls(callSid).update({
+                twiml: `<Response><Play>${audioUrl}</Play></Response>`
+              });
+
+            } catch (err) {
+              console.error("❌ Erreur lors du traitement:", err.message);
+            } finally {
+              isProcessing = false;
+            }
+          }
+        }
+      } catch (err) {
+        console.error("❌ Erreur parsing Deepgram:", err.message);
+      }
+    });
+
+    deepgramWs.on("error", (err) => {
+      console.error("❌ Deepgram WebSocket error:", err.message);
+    });
+
+    deepgramWs.on("close", () => {
+      console.log("🔌 Deepgram WebSocket fermé");
+    });
+  }
+
+  // Gérer les messages de Twilio
   ws.on("message", async (msg) => {
     try {
       const data = JSON.parse(msg);
 
-      // Gestion de l'événement start
       if (data.event === "start") {
         callSid = data.start.callSid;
-        console.log("📞 Call started:", callSid);
-        audioChunks = [];
-        lastSpeechTime = Date.now();
-        isSpeaking = false;
-        conversationHistory = [];
-        processing = false;
-        return;
+        streamSid = data.start.streamSid;
+        console.log("📞 Appel démarré:", callSid);
+        
+        // Connecter à Deepgram
+        connectDeepgram();
       }
 
-      // Gestion de l'événement media (audio en temps réel)
-      if (data.event === "media" && callSid) {
-        const audioBuffer = Buffer.from(data.media.payload, "base64");
-        audioChunks.push(audioBuffer);
-
-        // Détecter si l'utilisateur parle ou est silencieux
-        const isSilent = detectSilence(audioBuffer);
-
-        if (!isSilent && !isSpeaking) {
-          // L'utilisateur commence à parler
-          isSpeaking = true;
-          console.log("🗣️ User started speaking");
-          lastSpeechTime = Date.now();
-          
-          // Annuler le timer de silence si existant
-          if (silenceTimer) {
-            clearTimeout(silenceTimer);
-            silenceTimer = null;
-          }
-        } else if (isSilent && isSpeaking) {
-          // L'utilisateur s'est arrêté de parler
-          const silenceDuration = Date.now() - lastSpeechTime;
-          
-          if (silenceDuration > SILENCE_DURATION && !processing) {
-            // Vérifier qu'on a assez de parole
-            const totalAudioDuration = audioChunks.length * 20; // Twilio envoie 20ms chunks
-            
-            if (totalAudioDuration > MIN_SPEECH_DURATION) {
-              await processUserSpeech();
-            } else {
-              // Trop court, réinitialiser
-              audioChunks = [];
-              isSpeaking = false;
-            }
-          }
-        } else if (!isSilent && isSpeaking) {
-          // Continuer de parler, mettre à jour le timestamp
-          lastSpeechTime = Date.now();
-        }
+      if (data.event === "media" && deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+        // Transférer l'audio à Deepgram pour transcription en temps réel
+        const audioPayload = Buffer.from(data.media.payload, "base64");
+        deepgramWs.send(audioPayload);
       }
 
-      // Gestion de l'événement stop
       if (data.event === "stop") {
-        console.log("📞 Call ended");
+        console.log("📞 Appel terminé");
         
-        // Nettoyer les timers
-        if (silenceTimer) clearTimeout(silenceTimer);
+        // Nettoyer l'historique
+        if (callSid) {
+          conversationHistory.delete(callSid);
+        }
         
-        // Traiter le dernier audio si nécessaire
-        if (audioChunks.length > 0 && !processing) {
-          await processUserSpeech();
+        // Fermer la connexion Deepgram
+        if (deepgramWs) {
+          deepgramWs.close();
         }
       }
-
-    } catch (error) {
-      console.error("WebSocket message error:", error);
+    } catch (err) {
+      console.error("❌ Erreur WebSocket:", err.message);
     }
   });
 
   ws.on("close", () => {
-    console.log("🔌 WebSocket disconnected");
-    if (silenceTimer) clearTimeout(silenceTimer);
-  });
-
-  ws.on("error", (error) => {
-    console.error("WebSocket error:", error);
-  });
-
-  // Fonction pour traiter la parole de l'utilisateur
-  async function processUserSpeech() {
-    if (processing) return;
-    
-    processing = true;
-    console.log("📝 Processing user speech...");
-
-    try {
-      // Concaténer tous les chunks audio
-      const audioBuffer = Buffer.concat(audioChunks);
-      audioChunks = []; // Réinitialiser pour la prochaine parole
-      
-      // Transcrire l'audio
-      const transcript = await deepgramSTT(audioBuffer);
-      
-      if (!transcript || transcript.trim().length === 0) {
-        console.log("🔇 No speech detected or empty transcript");
-        processing = false;
-        isSpeaking = false;
-        return;
-      }
-
-      console.log("🧠 USER:", transcript);
-      
-      // Ajouter à l'historique
-      conversationHistory.push({ role: "user", content: transcript });
-
-      // Obtenir la réponse de GPT
-      const reply = await askGPT(transcript, conversationHistory);
-      console.log("🤖 AGENT:", reply);
-      
-      // Ajouter la réponse à l'historique
-      conversationHistory.push({ role: "assistant", content: reply });
-
-      // Convertir en audio
-      const audioUrl = await deepgramTTS(reply, callSid);
-      
-      if (!audioUrl) {
-        throw new Error("Failed to generate TTS audio");
-      }
-
-      // Jouer la réponse via Twilio
-      const vr = new twilio.twiml.VoiceResponse();
-      vr.play(audioUrl);
-
-      await twilioClient.calls(callSid).update({ twiml: vr.toString() });
-      
-      console.log("✅ Response played successfully");
-
-    } catch (error) {
-      console.error("Processing error:", error);
-    } finally {
-      processing = false;
-      isSpeaking = false;
+    console.log("🔌 WebSocket Twilio fermé");
+    if (deepgramWs) {
+      deepgramWs.close();
     }
-  }
-});
+  });
 
-/* =========================
-   HEALTH CHECK
-========================= */
-app.get("/health", (req, res) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString() });
+  ws.on("error", (err) => {
+    console.error("❌ WebSocket Twilio error:", err.message);
+  });
 });
 
 /* =========================
@@ -378,8 +276,7 @@ app.get("/health", (req, res) => {
 ========================= */
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, "0.0.0.0", () => {
-  console.log("✅ SERVER READY");
-  console.log("🌐 Webhook URL:", `${baseUrl()}/voice`);
-  console.log("🔌 WebSocket URL:", `${baseUrl().replace('https', 'wss')}/ws`);
-  console.log("🏥 Health check:", `${baseUrl()}/health`);
+  console.log("✅ SERVEUR PRÊT");
+  console.log("🌐 Webhook /voice =", `${baseUrl()}/voice`);
+  console.log("🎤 WebSocket /ws =", `${baseUrl().replace("https", "wss")}/ws`);
 });
