@@ -1,13 +1,14 @@
 /**
  * server.js
- * COMPLETE Real Estate Voice Agent with TTS
- * Pipeline: Twilio → Deepgram STT → GPT-4o → Deepgram TTS → Twilio
+ * COMPLETE Real Estate Voice Agent with TTS + IVR
+ * Pipeline: Twilio → IVR Menu → Deepgram STT → GPT-4o → Deepgram TTS → Twilio
  * 
  * FULLY FUNCTIONAL:
- * - English greeting
+ * - IVR menu (press any key to start)
+ * - English conversation
  * - Listens and transcribes (Deepgram STT)
  * - Thinks and responds (GPT-4o)
- * - Speaks back (Deepgram TTS)
+ * - Speaks back (Deepgram TTS with proper audio conversion)
  * - Fast and responsive
  */
 
@@ -19,7 +20,6 @@ const WebSocket = require("ws");
 const twilio = require("twilio");
 const { createClient, LiveTranscriptionEvents } = require("@deepgram/sdk");
 const OpenAI = require("openai");
-const fs = require("fs");
 
 /* =========================
    ENV VALIDATION
@@ -88,19 +88,19 @@ function wsUrl() {
    ROUTES
 ========================= */
 app.get("/", (req, res) => {
-  res.send("✅ Real Estate Voice Agent Active (with TTS)");
+  res.send("✅ Real Estate Voice Agent Active (with TTS + IVR)");
 });
 
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
     timestamp: new Date().toISOString(),
-    service: "voice-agent-tts"
+    service: "voice-agent-tts-ivr"
   });
 });
 
 /* =========================
-   TWILIO WEBHOOK
+   TWILIO WEBHOOK - IVR MENU
 ========================= */
 app.post("/voice", (req, res) => {
   console.log("\n📞 ════════════════════════════════");
@@ -112,13 +112,46 @@ app.post("/voice", (req, res) => {
 
   const vr = new VoiceResponse();
 
-  // English greeting
-  vr.say(
-    { voice: "Polly.Joanna", language: "en-US" },
-    "Hello, this is Ava from Prestige Real Estate. How can I help you today?"
+  // IVR: Ask to press any key
+  const gather = vr.gather({
+    numDigits: 1,
+    action: "/start-conversation",
+    method: "POST",
+    timeout: 10
+  });
+  
+  gather.say(
+    { voice: "alice" },
+    "Hello, this is Ava from Prestige Real Estate. Press any key to start the conversation."
   );
 
-  // Start WebSocket stream
+  // If no key pressed, repeat once then hangup
+  vr.say({ voice: "alice" }, "We didn't receive any input. Goodbye.");
+  vr.hangup();
+
+  res.type("text/xml").send(vr.toString());
+});
+
+/* =========================
+   START CONVERSATION AFTER KEY PRESS
+========================= */
+app.post("/start-conversation", (req, res) => {
+  console.log("\n✅ ════════════════════════════════");
+  console.log("✅ KEY PRESSED - STARTING CONVERSATION");
+  console.log("✅ ════════════════════════════════");
+  console.log("📱 Digit pressed:", req.body.Digits);
+  console.log("📱 CallSid:", req.body.CallSid);
+  console.log("✅ ════════════════════════════════\n");
+
+  const vr = new VoiceResponse();
+
+  // Greeting after key press
+  vr.say(
+    { voice: "alice" },
+    "Great! How can I help you today?"
+  );
+
+  // Start WebSocket stream for real conversation
   vr.start().stream({ url: wsUrl() });
   vr.pause({ length: 60 });
 
@@ -157,16 +190,6 @@ Rules:
 Memory format:
 Start with: [MEM: name=John, intent=BUY, budget=500000]
 Then your response.
-
-Examples:
-User: "Do you have houses to rent?"
-You: "I specialize in buying and selling. Are you looking to buy or sell a property?"
-
-User: "I want to buy"
-You: [MEM: intent=BUY] "Great! What area are you interested in?"
-
-User: "Around $400k in Miami"
-You: [MEM: budget=400000, location=Miami] "Perfect! When are you looking to buy?"
 
 Be natural, brief, and action-oriented.`
     };
@@ -227,7 +250,7 @@ function parseMemoryUpdate(response, memory) {
 ========================= */
 async function textToSpeech(text) {
   try {
-    console.log(`   🔊 Generating TTS for: "${text}"`);
+    console.log(`   🔊 Generating TTS: "${text}"`);
 
     // Request audio in PCM WAV format (16-bit, 16000 Hz)
     const response = await fetch("https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=linear16&sample_rate=16000", {
@@ -364,39 +387,33 @@ wss.on("connection", (ws) => {
       return;
     }
 
-    // Anti-repetition
     if (text === lastUserText) {
-      console.log("   🔁 Repeated - moving forward");
+      console.log("   🔁 Repeated phrase");
     }
     lastUserText = text;
 
     isProcessing = true;
-    isSpeaking = false; // User is speaking, agent stops
+    isSpeaking = false;
     console.log(`\n👤 USER: "${text}"`);
 
     try {
-      // Add to history
       conversationHistory.push({
         role: "user",
         content: text
       });
 
-      // Get GPT response
       const rawResponse = await askGPT({
         conversationHistory,
         memory
       });
 
-      // Parse memory
       const cleanResponse = parseMemoryUpdate(rawResponse, memory);
 
-      // Add to history
       conversationHistory.push({
         role: "assistant",
         content: cleanResponse
       });
 
-      // Trim history
       if (conversationHistory.length > MAX_HISTORY) {
         conversationHistory.splice(0, 2);
       }
@@ -404,7 +421,7 @@ wss.on("connection", (ws) => {
       console.log(`🤖 AVA: "${cleanResponse}"`);
       console.log(`🧠 Memory:`, JSON.stringify(memory, null, 2));
 
-      // 🔊 GENERATE AND SEND TTS
+      // Generate and send TTS
       isSpeaking = true;
       const audioBuffer = await textToSpeech(cleanResponse);
       
@@ -412,13 +429,13 @@ wss.on("connection", (ws) => {
         await sendAudioToTwilio(audioBuffer, ws, streamSid);
         console.log("   🎤 Agent finished speaking");
       } else {
-        console.log("   ⚠️ No audio generated or no streamSid");
+        console.log("   ⚠️ No audio or streamSid");
       }
       
       isSpeaking = false;
 
     } catch (error) {
-      console.error("❌ Error in handleUserUtterance:", error.message);
+      console.error("❌ Error:", error.message);
     } finally {
       isProcessing = false;
     }
@@ -440,7 +457,7 @@ wss.on("connection", (ws) => {
     punctuate: true,
   });
 
-  console.log("🎤 Deepgram STT connected (nova-3, en-US)");
+  console.log("🎤 Deepgram STT connected");
 
   /* =========
      DEEPGRAM EVENTS
@@ -477,7 +494,7 @@ wss.on("connection", (ws) => {
     utteranceBuffer = "";
 
     if (finalText) {
-      console.log("   ✅ UtteranceEnd detected");
+      console.log("   ✅ UtteranceEnd");
       handleUserUtterance(finalText);
     }
   });
@@ -486,9 +503,8 @@ wss.on("connection", (ws) => {
     console.log("   🎤 Speech started");
     
     if (isSpeaking) {
-      console.log("   ⚠️ Agent interrupted");
+      console.log("   ⚠️ Interrupted");
       isSpeaking = false;
-      // In production: stop audio playback here
     }
   });
 
@@ -508,7 +524,6 @@ wss.on("connection", (ws) => {
       const data = JSON.parse(msg);
 
       if (data.event === "media") {
-        // Send incoming audio to Deepgram STT
         dg.send(Buffer.from(data.media.payload, "base64"));
       }
 
@@ -530,7 +545,7 @@ wss.on("connection", (ws) => {
       }
 
     } catch (e) {
-      console.error("❌ WebSocket message error:", e.message);
+      console.error("❌ WebSocket error:", e.message);
     }
   });
 
@@ -563,13 +578,14 @@ const PORT = process.env.PORT || 10000;
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log("\n🚀 ════════════════════════════════");
-  console.log("🚀 VOICE AGENT WITH TTS STARTED");
+  console.log("🚀 VOICE AGENT WITH TTS + IVR");
   console.log("🚀 ════════════════════════════════");
   console.log(`📡 Port: ${PORT}`);
   console.log(`🌐 URL: ${baseUrl()}`);
   console.log(`🔌 WebSocket: ${wsUrl()}`);
   console.log(`📞 Webhook: ${baseUrl()}/voice`);
+  console.log(`📞 IVR: ${baseUrl()}/start-conversation`);
   console.log(`🔊 TTS: Deepgram Aura`);
   console.log("🚀 ════════════════════════════════");
-  console.log("✅ Ready for calls with voice\n");
+  console.log("✅ Ready for calls\n");
 });
