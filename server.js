@@ -232,25 +232,56 @@ wss.on("connection", (ws) => {
   let buffer = "";
   let safetyTimer = null;
   let busy = false;
+  let dg = null; // ✅ Defer creation until call starts
 
   const memory = { intent: null, budget: null, location: null };
   const history = [];
 
-  // ✅ Deepgram STT — STABLE LIVE WS
-  const dg = deepgram.listen.live({
-    model: "nova-2", // ✅ MUST (stable)
-    language: "en-US",
-    encoding: "mulaw",
-    sample_rate: 8000,
-    interim_results: true,
-    vad_events: true,
-    utterance_end_ms: UTTERANCE_END_MS,
-    endpointing: ENDPOINTING_MS,
-  });
+  // ✅ Create Deepgram connection only when call starts
+  function initDeepgram() {
+    if (dg) return; // Already initialized
 
-  dg.on(LiveTranscriptionEvents.Error, (e) => {
-    console.error("❌ Deepgram STT error:", e);
-  });
+    console.log("🎤 Initializing Deepgram STT...");
+    
+    dg = deepgram.listen.live({
+      model: "nova-2", // ✅ MUST (stable)
+      language: "en-US",
+      encoding: "mulaw",
+      sample_rate: 8000,
+      interim_results: true,
+      vad_events: true,
+      utterance_end_ms: UTTERANCE_END_MS,
+      endpointing: ENDPOINTING_MS,
+    });
+
+    dg.on(LiveTranscriptionEvents.Error, (e) => {
+      console.error("❌ Deepgram STT error:", e);
+      dg = null; // Reset on error
+    });
+
+    dg.on(LiveTranscriptionEvents.Transcript, (data) => {
+      const t = data.channel?.alternatives?.[0]?.transcript;
+      if (!t) return;
+
+      if (data.is_final) {
+        buffer += " " + t;
+
+        clearTimeout(safetyTimer);
+        safetyTimer = setTimeout(() => {
+          const final = buffer.trim();
+          buffer = "";
+          handle(final);
+        }, SAFETY_TIMEOUT);
+      }
+    });
+
+    dg.on(LiveTranscriptionEvents.UtteranceEnd, () => {
+      clearTimeout(safetyTimer);
+      const final = buffer.trim();
+      buffer = "";
+      handle(final);
+    });
+  }
 
   async function handle(text) {
     if (busy || !callSid || text.length < MIN_CHARS) return;
@@ -276,39 +307,23 @@ wss.on("connection", (ws) => {
     }
   }
 
-  dg.on(LiveTranscriptionEvents.Transcript, (data) => {
-    const t = data.channel?.alternatives?.[0]?.transcript;
-    if (!t) return;
-
-    if (data.is_final) {
-      buffer += " " + t;
-
-      clearTimeout(safetyTimer);
-      safetyTimer = setTimeout(() => {
-        const final = buffer.trim();
-        buffer = "";
-        handle(final);
-      }, SAFETY_TIMEOUT);
-    }
-  });
-
-  dg.on(LiveTranscriptionEvents.UtteranceEnd, () => {
-    clearTimeout(safetyTimer);
-    const final = buffer.trim();
-    buffer = "";
-    handle(final);
-  });
-
   ws.on("message", (msg) => {
     const data = JSON.parse(msg);
 
     if (data.event === "start") {
       callSid = data.start.callSid;
       console.log("📞 Call started:", callSid);
+      
+      // ✅ Initialize Deepgram when call starts
+      if (!dg) {
+        initDeepgram();
+      }
     }
 
     if (data.event === "media") {
-      dg.send(Buffer.from(data.media.payload, "base64"));
+      if (dg) {
+        dg.send(Buffer.from(data.media.payload, "base64"));
+      }
     }
 
     if (data.event === "stop") {
@@ -318,7 +333,9 @@ wss.on("connection", (ws) => {
 
   ws.on("close", () => {
     clearTimeout(safetyTimer);
-    dg.finish();
+    if (dg) {
+      dg.finish();
+    }
     console.log("🔒 WebSocket closed");
   });
 
