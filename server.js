@@ -1,24 +1,18 @@
 /**
- * server.js
- * AGENT VOCAL FONCTIONNEL — Conversation bidirectionnelle fluide
- * Twilio Media Stream → Deepgram WebSocket STT (avec VAD) → GPT → Deepgram TTS → Twilio
+ * server.js - THE ULTIMATE NATURAL VOICE AGENT
+ * Optimized for human-like speed and fluid English conversation.
  */
 
 require("dotenv").config();
-
 const express = require("express");
 const http = require("http");
 const WebSocket = require("ws");
 const twilio = require("twilio");
 const fs = require("fs");
 const path = require("path");
-const fetch = (...args) =>
-  import("node-fetch").then(({ default: fetch }) => fetch(...args));
+const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fetch(...args));
 const OpenAI = require("openai");
 
-/* =========================
-   ENV
-========================= */
 const {
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
@@ -27,13 +21,6 @@ const {
   RENDER_EXTERNAL_URL,
 } = process.env;
 
-if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !DEEPGRAM_API_KEY || !OPENAI_API_KEY || !RENDER_EXTERNAL_URL) {
-  throw new Error("❌ Missing env vars");
-}
-
-/* =========================
-   CLIENTS
-========================= */
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: "/ws" });
@@ -43,84 +30,65 @@ const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
-/* =========================
-   AUDIO DIR
-========================= */
 const AUDIO_DIR = path.join(__dirname, "audio");
 if (!fs.existsSync(AUDIO_DIR)) fs.mkdirSync(AUDIO_DIR);
 app.use("/audio", express.static(AUDIO_DIR));
 
 function baseUrl() {
-  return RENDER_EXTERNAL_URL.startsWith("http")
-    ? RENDER_EXTERNAL_URL
-    : `https://${RENDER_EXTERNAL_URL}`;
+  return RENDER_EXTERNAL_URL.startsWith("http") ? RENDER_EXTERNAL_URL : `https://${RENDER_EXTERNAL_URL}`;
 }
 
 /* =========================
-   TWILIO WEBHOOK
+   TWILIO WEBHOOKS
 ========================= */
 app.post("/voice", (req, res) => {
   const vr = new twilio.twiml.VoiceResponse();
-
-  const gather = vr.gather({
-    numDigits: 1,
-    action: "/start",
-    method: "POST",
-  });
-
-  gather.say({ voice: "alice", language: "fr-FR" }, "Bonjour. Appuyez sur n'importe quelle touche pour commencer.");
-
+  const gather = vr.gather({ numDigits: 1, action: "/start", method: "POST" });
+  gather.say({ voice: "en-US-Standard-C" }, "Hey there! Press any key to start our conversation.");
   res.type("text/xml").send(vr.toString());
 });
 
 app.post("/start", (req, res) => {
   const vr = new twilio.twiml.VoiceResponse();
-
-  vr.say({ voice: "alice", language: "fr-FR" }, "Comment puis-je vous aider aujourd'hui?");
-  vr.start().stream({ url: `${baseUrl().replace("https", "wss")}/ws` });
-  vr.pause({ length: 60 });
-
+  // Immediate transition to streaming
+  const connect = vr.connect();
+  connect.stream({ url: `${baseUrl().replace("https", "wss")}/ws` });
+  vr.pause({ length: 3600 }); // Keep the line open for 1 hour
   res.type("text/xml").send(vr.toString());
 });
 
 /* =========================
-   GPT — Historique de conversation
+   GPT LOGIC (HUMAN STYLE)
 ========================= */
-const conversationHistory = new Map(); // callSid -> messages[]
+const conversationHistory = new Map();
 
 async function askGPT(text, callSid) {
-  // Initialiser l'historique si nécessaire
   if (!conversationHistory.has(callSid)) {
     conversationHistory.set(callSid, [
       {
         role: "system",
-        content: "Tu es un assistant immobilier professionnel et amical. Pose des questions courtes et claires. Réponds de manière concise et naturelle."
+        content: "You are a friendly, professional human real estate assistant. RULES: 1. Be extremely concise (10-15 words max). 2. Use natural fillers like 'Oh', 'I see', or 'Great'. 3. Sound like you are on a real phone call. 4. Always keep the conversation moving with a short follow-up question. 5. Speak ONLY in English."
       }
     ]);
   }
 
   const history = conversationHistory.get(callSid);
-  
-  // Ajouter le message de l'utilisateur
   history.push({ role: "user", content: text });
 
   const r = await openai.chat.completions.create({
-    model: "gpt-4o",
-    temperature: 0.7,
-    max_tokens: 100,
+    model: "gpt-4o-mini", // Ultra-fast
+    temperature: 0.8, // More natural/less robotic
+    max_tokens: 50,
     messages: history,
   });
 
   const reply = r.choices[0].message.content.trim();
-  
-  // Ajouter la réponse de l'assistant
   history.push({ role: "assistant", content: reply });
-
   return reply;
 }
 
 /* =========================
-   DEEPGRAM TTS
+   DEEPGRAM TTS (AURA ENGINE)
 ========================= */
 async function deepgramTTS(text, callSid) {
   const file = `${callSid}-${Date.now()}.wav`;
@@ -130,157 +98,89 @@ async function deepgramTTS(text, callSid) {
     "https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=mulaw&sample_rate=8000&container=wav",
     {
       method: "POST",
-      headers: {
-        Authorization: `Token ${DEEPGRAM_API_KEY}`,
-        "Content-Type": "application/json",
-      },
+      headers: { Authorization: `Token ${DEEPGRAM_API_KEY}`, "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
     }
   );
 
-  if (!r.ok) {
-    throw new Error(`Deepgram TTS failed: ${r.status}`);
-  }
-
+  if (!r.ok) throw new Error(`TTS Failed: ${r.status}`);
   fs.writeFileSync(filePath, Buffer.from(await r.arrayBuffer()));
   return `${baseUrl()}/audio/${file}`;
 }
 
 /* =========================
-   WS MEDIA STREAM avec Deepgram WebSocket STT
+   WEBSOCKET STREAMING
 ========================= */
 wss.on("connection", (ws) => {
-  console.log("📞 Nouvelle connexion WebSocket");
-  
   let callSid = null;
   let deepgramWs = null;
-  let isProcessing = false; // Empêcher les réponses multiples simultanées
-  let streamSid = null;
+  let isProcessing = false;
 
-  // Connexion à Deepgram WebSocket pour STT en temps réel
   function connectDeepgram() {
-    // Simplification de l'URL pour éviter l'erreur 400
-    const dgUrl = "wss://api.deepgram.com/v1/listen?model=nova-2&encoding=mulaw&sample_rate=8000&language=fr&punctuate=true&interim_results=false&smart_format=true&endpointing=300";
+    // Nova-2-Phone is the best for this use case
+    const dgUrl = "wss://api.deepgram.com/v1/listen?model=nova-2-phone&encoding=mulaw&sample_rate=8000&language=en-US&punctuate=true&interim_results=true&endpointing=250&smart_format=true";
     
-    deepgramWs = new WebSocket(dgUrl, {
-      headers: {
-        Authorization: `Token ${DEEPGRAM_API_KEY}`,
-      },
-    });
-
-    deepgramWs.on("open", () => {
-      console.log("✅ Deepgram WebSocket connecté");
-    });
+    deepgramWs = new WebSocket(dgUrl, { headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` } });
 
     deepgramWs.on("message", async (data) => {
       try {
         const result = JSON.parse(data);
-        
-        // Vérifier si c'est une transcription finale
         if (result.type === "Results") {
           const transcript = result.channel.alternatives[0].transcript.trim();
-          const isFinal = result.is_final;
-          const speechFinal = result.speech_final;
-
-          if (transcript) {
-            console.log(`🎤 Transcription (${isFinal ? 'Finale' : 'Intermédiaire'}):`, transcript);
-          }
           
-          // On traite quand c'est speech_final (fin de phrase détectée)
-          if (speechFinal && transcript.length > 1 && !isProcessing) {
+          if (result.speech_final && transcript.length > 1 && !isProcessing) {
             isProcessing = true;
-            console.log("🧠 USER:", transcript);
+            console.log("🎤 USER:", transcript);
 
             try {
-              // Obtenir la réponse de GPT
               const reply = await askGPT(transcript, callSid);
               console.log("🤖 AGENT:", reply);
 
-              // Générer l'audio TTS
               const audioUrl = await deepgramTTS(reply, callSid);
 
-              // Envoyer l'audio à Twilio via TwiML
-              await twilioClient.calls(callSid).update({
-                twiml: `<Response><Play>${audioUrl}</Play></Response>`
-              });
+              // Update the call with the new response WITHOUT breaking the stream
+              const vr = new twilio.twiml.VoiceResponse();
+              vr.play(audioUrl);
+              const connect = vr.connect();
+              connect.stream({ url: `${baseUrl().replace("https", "wss")}/ws` });
+              vr.pause({ length: 3600 });
+
+              await twilioClient.calls(callSid).update({ twiml: vr.toString() });
 
             } catch (err) {
-              console.error("❌ Erreur lors du traitement:", err.message);
+              console.error("Processing Error:", err.message);
             } finally {
               isProcessing = false;
             }
           }
         }
       } catch (err) {
-        console.error("❌ Erreur parsing Deepgram:", err.message);
+        console.error("Deepgram Error:", err.message);
       }
-    });
-
-    deepgramWs.on("error", (err) => {
-      console.error("❌ Deepgram WebSocket error:", err.message);
-    });
-
-    deepgramWs.on("close", () => {
-      console.log("🔌 Deepgram WebSocket fermé");
     });
   }
 
-  // Gérer les messages de Twilio
-  ws.on("message", async (msg) => {
-    try {
-      const data = JSON.parse(msg);
-
-      if (data.event === "start") {
-        callSid = data.start.callSid;
-        streamSid = data.start.streamSid;
-        console.log("📞 Appel démarré:", callSid);
-        
-        // Connecter à Deepgram
-        connectDeepgram();
-      }
-
-      if (data.event === "media" && deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-        // Transférer l'audio à Deepgram pour transcription en temps réel
-        const audioPayload = Buffer.from(data.media.payload, "base64");
-        deepgramWs.send(audioPayload);
-      }
-
-      if (data.event === "stop") {
-        console.log("📞 Appel terminé");
-        
-        // Nettoyer l'historique
-        if (callSid) {
-          conversationHistory.delete(callSid);
-        }
-        
-        // Fermer la connexion Deepgram
-        if (deepgramWs) {
-          deepgramWs.close();
-        }
-      }
-    } catch (err) {
-      console.error("❌ Erreur WebSocket:", err.message);
+  ws.on("message", (msg) => {
+    const data = JSON.parse(msg);
+    if (data.event === "start") {
+      callSid = data.start.callSid;
+      console.log("📞 Call Connected:", callSid);
+      connectDeepgram();
+    }
+    if (data.event === "media" && deepgramWs?.readyState === WebSocket.OPEN) {
+      deepgramWs.send(Buffer.from(data.media.payload, "base64"));
+    }
+    if (data.event === "stop") {
+      console.log("📞 Call Ended");
+      conversationHistory.delete(callSid);
+      deepgramWs?.close();
     }
   });
 
-  ws.on("close", () => {
-    console.log("🔌 WebSocket Twilio fermé");
-    if (deepgramWs) {
-      deepgramWs.close();
-    }
-  });
-
-  ws.on("error", (err) => {
-    console.error("❌ WebSocket Twilio error:", err.message);
-  });
+  ws.on("close", () => deepgramWs?.close());
 });
 
-/* =========================
-   START
-========================= */
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, "0.0.0.0", () => {
-  console.log("✅ SERVEUR PRÊT");
-  console.log("🌐 Webhook /voice =", `${baseUrl()}/voice`);
-  console.log("🎤 WebSocket /ws =", `${baseUrl().replace("https", "wss")}/ws`);
+  console.log(`✅ AGENT ONLINE ON PORT ${PORT}`);
 });
