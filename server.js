@@ -159,7 +159,8 @@ wss.on("connection", (ws) => {
 
   // Connexion à Deepgram WebSocket pour STT en temps réel
   function connectDeepgram() {
-    const dgUrl = "wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&language=fr&punctuate=true&interim_results=false&endpointing=300&utterance_end_ms=1000";
+    // Simplification de l'URL pour éviter l'erreur 400
+    const dgUrl = "wss://api.deepgram.com/v1/listen?model=nova-2&encoding=mulaw&sample_rate=8000&language=fr&punctuate=true&interim_results=false&smart_format=true&endpointing=300";
     
     deepgramWs = new WebSocket(dgUrl, {
       headers: {
@@ -176,14 +177,17 @@ wss.on("connection", (ws) => {
         const result = JSON.parse(data);
         
         // Vérifier si c'est une transcription finale
-        if (result.type === "Results" && result.channel?.alternatives?.[0]?.transcript) {
+        if (result.type === "Results") {
           const transcript = result.channel.alternatives[0].transcript.trim();
+          const isFinal = result.is_final;
+          const speechFinal = result.speech_final;
+
+          if (transcript) {
+            console.log(`🎤 Transcription (${isFinal ? 'Finale' : 'Intermédiaire'}):`, transcript);
+          }
           
-          // Ignorer les transcriptions vides ou trop courtes
-          if (!transcript || transcript.length < 2) return;
-          
-          // Vérifier si c'est la fin d'un énoncé (speech_final)
-          if (result.speech_final && !isProcessing) {
+          // On traite quand c'est speech_final (fin de phrase détectée)
+          if (speechFinal && transcript.length > 1 && !isProcessing) {
             isProcessing = true;
             console.log("🧠 USER:", transcript);
 
