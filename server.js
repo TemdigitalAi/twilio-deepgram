@@ -78,7 +78,7 @@ async function askGPT(text, callSid) {
   const r = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     temperature: 0.5,
-    max_tokens: 40,
+    max_tokens: 35,
     messages: history,
   });
 
@@ -117,6 +117,9 @@ wss.on("connection", (ws) => {
   let isProcessing = false;
   let silenceTimer = null;
 
+
+  // silence si personne parle durant appel 
+
   function resetSilenceTimer() {
     if (silenceTimer) clearTimeout(silenceTimer);
     silenceTimer = setTimeout(async () => {
@@ -132,11 +135,13 @@ wss.on("connection", (ws) => {
           await twilioClient.calls(callSid).update({ twiml: vr.toString() });
         } catch (e) { console.error("Silence handler error", e.message); }
       }
-    }, 12000); // 12 seconds of silence
+    }, 10000); // 10 secondes of silence
   }
 
+
+  // detection de la fin  parole via deepgram  
   function connectDeepgram() {
-    const dgUrl = "wss://api.deepgram.com/v1/listen?model=nova-2&encoding=mulaw&sample_rate=8000&language=en-US&punctuate=true&interim_results=true&endpointing=250";
+    const dgUrl = "wss://api.deepgram.com/v1/listen?model=nova-2&encoding=mulaw&sample_rate=8000&language=en-US&punctuate=true&interim_results=true&endpointing=300";
     deepgramWs = new WebSocket(dgUrl, { headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` } });
 
     deepgramWs.on("message", async (data) => {
@@ -158,6 +163,7 @@ wss.on("connection", (ws) => {
               const audioUrl = await deepgramTTS(reply, callSid);
 
               const vr = new twilio.twiml.VoiceResponse();
+
               // BARGE-IN: If the user speaks during this play, Twilio will stop it
               vr.play(audioUrl);
               const connect = vr.connect();
