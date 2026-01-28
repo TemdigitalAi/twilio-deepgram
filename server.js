@@ -1,6 +1,6 @@
 /**
- * server.js - THE ULTIMATE NATURAL VOICE AGENT
- * Optimized for human-like speed and fluid English conversation.
+ * server.js - PRO VERSION: POWERFUL & HUMAN-LIKE
+ * Features: Barge-in support, Inactivity detection, Ultra-concise responses.
  */
 
 require("dotenv").config();
@@ -44,30 +44,30 @@ function baseUrl() {
 app.post("/voice", (req, res) => {
   const vr = new twilio.twiml.VoiceResponse();
   const gather = vr.gather({ numDigits: 1, action: "/start", method: "POST" });
-  gather.say({ voice: "en-US-Standard-C" }, "Hey there! Press any key to start our conversation.");
+  gather.say({ voice: "en-US-Standard-C" }, "Hey! Press any key to start.");
   res.type("text/xml").send(vr.toString());
 });
 
 app.post("/start", (req, res) => {
   const vr = new twilio.twiml.VoiceResponse();
-  // Immediate transition to streaming
   const connect = vr.connect();
   connect.stream({ url: `${baseUrl().replace("https", "wss")}/ws` });
-  vr.pause({ length: 3600 }); // Keep the line open for 1 hour
+  vr.pause({ length: 3600 });
   res.type("text/xml").send(vr.toString());
 });
 
 /* =========================
-   GPT LOGIC (HUMAN STYLE)
+   GPT LOGIC (POWERFUL & CONCISE)
 ========================= */
 const conversationHistory = new Map();
+const lastActivity = new Map(); // For silence detection
 
 async function askGPT(text, callSid) {
   if (!conversationHistory.has(callSid)) {
     conversationHistory.set(callSid, [
       {
         role: "system",
-        content: "You are a professional and warm real estate assistant named Ava. Your goal is to have a natural, fluid conversation. \n\nGUIDELINES:\n1. Speak like a real human: use varied sentence structures and show genuine interest in the caller's needs.\n2. Avoid being repetitive: don't start every sentence with the same fillers. Use a diverse range of natural responses.\n3. Be concise but complete: provide helpful information in 1-3 clear sentences. Avoid being overly brief or robotic.\n4. Stay engaged: acknowledge what the user said specifically before moving to the next point or asking a follow-up question.\n5. Tone: Helpful, knowledgeable, and empathetic.\n6. Language: Strictly English."
+        content: "You are Ava, a high-performance real estate assistant. \n\nRULES:\n1. Be extremely concise: 15 words MAX per response.\n2. Be precise and impactful. No fluff.\n3. If interrupted, acknowledge the new input immediately.\n4. Language: English only."
       }
     ]);
   }
@@ -77,8 +77,8 @@ async function askGPT(text, callSid) {
 
   const r = await openai.chat.completions.create({
     model: "gpt-4o-mini",
-    temperature: 0.7, // Balanced for consistency and natural feel
-    max_tokens: 100, // Increased to allow for complete, natural sentences
+    temperature: 0.5,
+    max_tokens: 40,
     messages: history,
   });
 
@@ -88,7 +88,7 @@ async function askGPT(text, callSid) {
 }
 
 /* =========================
-   DEEPGRAM TTS (AURA ENGINE)
+   DEEPGRAM TTS
 ========================= */
 async function deepgramTTS(text, callSid) {
   const file = `${callSid}-${Date.now()}.wav`;
@@ -115,22 +115,29 @@ wss.on("connection", (ws) => {
   let callSid = null;
   let deepgramWs = null;
   let isProcessing = false;
+  let silenceTimer = null;
+
+  function resetSilenceTimer() {
+    if (silenceTimer) clearTimeout(silenceTimer);
+    silenceTimer = setTimeout(async () => {
+      if (callSid && !isProcessing) {
+        console.log("⏰ Silence detected, re-engaging...");
+        try {
+          const audioUrl = await deepgramTTS("Are you still there? I'm here if you have any questions.", callSid);
+          const vr = new twilio.twiml.VoiceResponse();
+          vr.play(audioUrl);
+          const connect = vr.connect();
+          connect.stream({ url: `${baseUrl().replace("https", "wss")}/ws` });
+          vr.pause({ length: 3600 });
+          await twilioClient.calls(callSid).update({ twiml: vr.toString() });
+        } catch (e) { console.error("Silence handler error", e.message); }
+      }
+    }, 12000); // 12 seconds of silence
+  }
 
   function connectDeepgram() {
-    // Changement vers le modèle 'nova-2' standard pour éviter l'erreur 403
-    const dgUrl = "wss://api.deepgram.com/v1/listen?model=nova-2&encoding=mulaw&sample_rate=8000&language=en-US&punctuate=true&interim_results=true&endpointing=250&smart_format=true";
-    
-    console.log("🔗 Connecting to Deepgram...");
+    const dgUrl = "wss://api.deepgram.com/v1/listen?model=nova-2&encoding=mulaw&sample_rate=8000&language=en-US&punctuate=true&interim_results=true&endpointing=250";
     deepgramWs = new WebSocket(dgUrl, { headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` } });
-
-    deepgramWs.on("open", () => {
-      console.log("✅ Deepgram Connection Open");
-    });
-
-    deepgramWs.on("error", (err) => {
-      console.error("❌ Deepgram WebSocket Error:", err.message);
-      // Ne pas faire planter le serveur
-    });
 
     deepgramWs.on("message", async (data) => {
       try {
@@ -138,6 +145,8 @@ wss.on("connection", (ws) => {
         if (result.type === "Results") {
           const transcript = result.channel.alternatives[0].transcript.trim();
           
+          if (transcript.length > 0) resetSilenceTimer();
+
           if (result.speech_final && transcript.length > 1 && !isProcessing) {
             isProcessing = true;
             console.log("🎤 USER:", transcript);
@@ -148,25 +157,22 @@ wss.on("connection", (ws) => {
 
               const audioUrl = await deepgramTTS(reply, callSid);
 
-              // Update the call with the new response WITHOUT breaking the stream
               const vr = new twilio.twiml.VoiceResponse();
+              // BARGE-IN: If the user speaks during this play, Twilio will stop it
               vr.play(audioUrl);
               const connect = vr.connect();
               connect.stream({ url: `${baseUrl().replace("https", "wss")}/ws` });
               vr.pause({ length: 3600 });
 
               await twilioClient.calls(callSid).update({ twiml: vr.toString() });
-
             } catch (err) {
-              console.error("Processing Error:", err.message);
+              console.error("Error:", err.message);
             } finally {
               isProcessing = false;
             }
           }
         }
-      } catch (err) {
-        console.error("Deepgram Error:", err.message);
-      }
+      } catch (err) { console.error("DG Error:", err.message); }
     });
   }
 
@@ -176,21 +182,26 @@ wss.on("connection", (ws) => {
       callSid = data.start.callSid;
       console.log("📞 Call Connected:", callSid);
       connectDeepgram();
+      resetSilenceTimer();
     }
     if (data.event === "media" && deepgramWs?.readyState === WebSocket.OPEN) {
       deepgramWs.send(Buffer.from(data.media.payload, "base64"));
     }
     if (data.event === "stop") {
+      if (silenceTimer) clearTimeout(silenceTimer);
       console.log("📞 Call Ended");
       conversationHistory.delete(callSid);
       deepgramWs?.close();
     }
   });
 
-  ws.on("close", () => deepgramWs?.close());
+  ws.on("close", () => {
+    if (silenceTimer) clearTimeout(silenceTimer);
+    deepgramWs?.close();
+  });
 });
 
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`✅ AGENT ONLINE ON PORT ${PORT}`);
+  console.log(`✅ POWERFUL AGENT ONLINE ON PORT ${PORT}`);
 });
