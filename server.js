@@ -117,10 +117,20 @@ wss.on("connection", (ws) => {
   let isProcessing = false;
 
   function connectDeepgram() {
-    // Nova-2-Phone is the best for this use case
-    const dgUrl = "wss://api.deepgram.com/v1/listen?model=nova-2-phone&encoding=mulaw&sample_rate=8000&language=en-US&punctuate=true&interim_results=true&endpointing=250&smart_format=true";
+    // Changement vers le modèle 'nova-2' standard pour éviter l'erreur 403
+    const dgUrl = "wss://api.deepgram.com/v1/listen?model=nova-2&encoding=mulaw&sample_rate=8000&language=en-US&punctuate=true&interim_results=true&endpointing=250&smart_format=true";
     
+    console.log("🔗 Connecting to Deepgram...");
     deepgramWs = new WebSocket(dgUrl, { headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` } });
+
+    deepgramWs.on("open", () => {
+      console.log("✅ Deepgram Connection Open");
+    });
+
+    deepgramWs.on("error", (err) => {
+      console.error("❌ Deepgram WebSocket Error:", err.message);
+      // Ne pas faire planter le serveur
+    });
 
     deepgramWs.on("message", async (data) => {
       try {
