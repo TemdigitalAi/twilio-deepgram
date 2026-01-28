@@ -67,7 +67,7 @@ async function askGPT(text, callSid) {
     conversationHistory.set(callSid, [
       {
         role: "system",
-        content: "You are a friendly, professional human real estate assistant. RULES: 1. Be extremely concise (10-15 words max). 2. Use natural fillers like 'Oh', 'I see', or 'Great'. 3. Sound like you are on a real phone call. 4. Always keep the conversation moving with a short follow-up question. 5. Speak ONLY in English."
+        content: "You are a professional and warm real estate assistant named Ava. Your goal is to have a natural, fluid conversation. \n\nGUIDELINES:\n1. Speak like a real human: use varied sentence structures and show genuine interest in the caller's needs.\n2. Avoid being repetitive: don't start every sentence with the same fillers. Use a diverse range of natural responses.\n3. Be concise but complete: provide helpful information in 1-3 clear sentences. Avoid being overly brief or robotic.\n4. Stay engaged: acknowledge what the user said specifically before moving to the next point or asking a follow-up question.\n5. Tone: Helpful, knowledgeable, and empathetic.\n6. Language: Strictly English."
       }
     ]);
   }
@@ -76,9 +76,9 @@ async function askGPT(text, callSid) {
   history.push({ role: "user", content: text });
 
   const r = await openai.chat.completions.create({
-    model: "gpt-4o-mini", // Ultra-fast
-    temperature: 0.8, // More natural/less robotic
-    max_tokens: 50,
+    model: "gpt-4o-mini",
+    temperature: 0.7, // Balanced for consistency and natural feel
+    max_tokens: 100, // Increased to allow for complete, natural sentences
     messages: history,
   });
 
