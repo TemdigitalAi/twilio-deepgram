@@ -95,8 +95,8 @@ You NEVER say you are an AI, a bot, or an assistant.
 You represent a real real estate service.
 
 GOALS:
-- Understand what the client wants to do: buy, sell, or rent.
-- Identify the type of property (house, condo, townhouse, etc.).
+- Identify whether the client wants to buy, sell, or rent.
+- Understand the property type (house, condo, townhouse, etc.).
 - Collect key information naturally, without sounding like a questionnaire.
 
 INFORMATION TO COLLECT NATURALLY (at least 5 over the conversation):
@@ -112,25 +112,16 @@ CONVERSATION STYLE:
 - Short sentences
 - One question at a time
 - Interruptible and pause-friendly
-- Never rush the client
 - Never repeat the same question
 
 REFORMULATION RULES:
 Only reformulate if the message is unclear, ambiguous, or missing a critical detail.
-When reformulating:
-- Ask ONE short clarification question
-- Sound natural
-- Do NOT over-explain
-
-GOOD reformulation:
-"Just to make sure I understood correctly, are you looking to buy or to rent?"
-
-BAD reformulation:
-"Can you clarify your request?"
+Ask ONE short clarification question.
+Do NOT over-explain.
 
 IMPORTANT:
 If the client has not yet clearly stated whether they want to buy, sell, or rent,
-politely guide the conversation to identify this first.
+guide the conversation to identify this first.
 
 LANGUAGE:
 - English only
@@ -164,7 +155,6 @@ wss.on("connection", (ws) => {
   let isProcessing = false;
   let silenceTimer = null;
 
-  /* ---------- SILENCE HANDLER ---------- */
   function resetSilenceTimer() {
     if (silenceTimer) clearTimeout(silenceTimer);
     silenceTimer = setTimeout(async () => {
@@ -172,7 +162,7 @@ wss.on("connection", (ws) => {
 
       try {
         const audioUrl = await speak(
-          "Just checking in — I'm still here if you have any questions.",
+          "Just checking in — I'm still here with you.",
           {
             audioDir: AUDIO_DIR,
             callSid,
@@ -193,7 +183,6 @@ wss.on("connection", (ws) => {
     }, 10000);
   }
 
-  /* ---------- CONNECT DEEPGRAM (STT) ---------- */
   function connectDeepgram() {
     deepgramWs = createDeepgramSTT(DEEPGRAM_API_KEY, async (transcript, isFinal) => {
       if (!transcript) return;
@@ -230,7 +219,6 @@ wss.on("connection", (ws) => {
     });
   }
 
-  /* ---------- TWILIO EVENTS ---------- */
   ws.on("message", (msg) => {
     const data = JSON.parse(msg);
 
@@ -247,9 +235,8 @@ wss.on("connection", (ws) => {
 
     if (data.event === "stop") {
       if (silenceTimer) clearTimeout(silenceTimer);
-      conversationHistory.delete(callSid);
       deepgramWs?.close();
-      console.log("📞 Call Ended");
+      console.log("📞 Call Stream Stopped (memory preserved)");
     }
   });
 
