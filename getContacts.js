@@ -26,7 +26,7 @@ async function getGHLContacts() {
   // Pour l'instant, retourner un contact de test
   return {
     name: 'Contact Test',
-    phone: '+14388361014', // ⚠️ REMPLACE PAR TON NUMÉRO POUR TESTER
+    phone: '+14388361014', //  REMPLACEr PAR TON NUMÉRO POUR TESTER / apres rendre ceci dynanique
     source: 'Test manuel',
     notes: 'Contact de test pour validation du système'
   };

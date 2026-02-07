@@ -8,7 +8,7 @@ const makeCall = require('./makeCall');
 
 (async () => {
   try {
-    console.log('🔍 Récupération du contact...');
+    console.log('Récupération du contact...');
     const contact = await getGHLContacts();
     
     if (!contact) {
