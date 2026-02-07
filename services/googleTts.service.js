@@ -24,7 +24,6 @@ const textToSpeech = require("@google-cloud/text-to-speech");
 if (process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON) {
   const credsPath = "/tmp/google-creds.json";
 
-  // On écrit le fichier une seule fois
   if (!fs.existsSync(credsPath)) {
     fs.writeFileSync(
       credsPath,
@@ -32,7 +31,6 @@ if (process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON) {
     );
   }
 
-  // Variable attendue par le SDK Google
   process.env.GOOGLE_APPLICATION_CREDENTIALS = credsPath;
 }
 
@@ -45,31 +43,33 @@ const client = new textToSpeech.TextToSpeechClient();
    SSML HUMANIZER
 ========================= */
 /**
- * Transforme un texte normal en SSML naturel :
+ * Transforme un texte brut en SSML naturel :
  * - pauses après ponctuation
  * - rythme conversationnel
  * - respiration humaine
+ * - ton chaleureux
  */
 function toSSML(text) {
   if (!text || !text.trim()) {
     return "<speak></speak>";
   }
 
-  // Échapper les caractères interdits en SSML
+  // Échapper caractères interdits en SSML
   const escaped = text
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 
   return `
-    <speak>
-      <prosody rate="medium" pitch="0st">
-        ${escaped
-          .replace(/([,.])/g, '$1 <break time="200ms"/>')
-          .replace(/([?!])/g, '$1 <break time="350ms"/>')}
-      </prosody>
-    </speak>
-  `;
+<speak>
+  <prosody rate="95%" pitch="-1st">
+    <break time="200ms"/>
+    ${escaped
+      .replace(/([,.])/g, '$1 <break time="200ms"/>')
+      .replace(/([?!])/g, '$1 <break time="350ms"/>')}
+  </prosody>
+</speak>
+`;
 }
 
 /* =========================
@@ -94,7 +94,7 @@ async function googleTTS(text, audioDir, callSid, baseUrl) {
 
   const request = {
     input: {
-      ssml: toSSML(text), //  SSML HUMAIN
+      ssml: toSSML(text), // 🧠 SSML HUMAIN
     },
     voice: {
       languageCode: "en-US",
@@ -103,7 +103,7 @@ async function googleTTS(text, audioDir, callSid, baseUrl) {
     audioConfig: {
       audioEncoding: "MULAW", // OBLIGATOIRE pour Twilio
       sampleRateHertz: 8000,  // Téléphonie
-      speakingRate: 1.0,      // SSML gère le rythme
+      speakingRate: 1.0,      // le rythme est piloté par SSML
     },
   };
 
