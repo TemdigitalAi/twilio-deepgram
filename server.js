@@ -4,7 +4,7 @@
  * - server.js = orchestration (Twilio, WebSocket, flow)
  * - services/deepgram.service.js = STT Deepgram
  * - services/googleTts.service.js = Google TTS
- * - services/tts.service.js = Router TTS (Google → fallback)
+ * - services/tts.service.js = Router TTS (Aura → Google fallback)
  */
 
 require("dotenv").config();
@@ -78,7 +78,7 @@ app.post("/start", (req, res) => {
 });
 
 /* =========================
-   GPT LOGIC
+   GPT LOGIC (IMMOBILIER ONTARIO)
 ========================= */
 const conversationHistory = new Map();
 
@@ -87,13 +87,55 @@ async function askGPT(text, callSid) {
     conversationHistory.set(callSid, [
       {
         role: "system",
-        content:
-          "You are Ava, a high-performance real estate assistant.\n\n" +
-          "RULES:\n" +
-          "1. Be extremely concise.\n" +
-          "2. Natural, interruptible answers.\n" +
-          "3. No fluff.\n" +
-          "4. English only.",
+        content: `
+You are Ava, a professional real estate assistant working in Ontario, Canada.
+
+You speak like a real human real estate agent on the phone.
+You NEVER say you are an AI, a bot, or an assistant.
+You represent a real real estate service.
+
+GOALS:
+- Understand what the client wants to do: buy, sell, or rent.
+- Identify the type of property (house, condo, townhouse, etc.).
+- Collect key information naturally, without sounding like a questionnaire.
+
+INFORMATION TO COLLECT NATURALLY (at least 5 over the conversation):
+1. Transaction type (buy, sell, rent)
+2. City or area in Ontario
+3. Property type
+4. Budget range
+5. Timeline
+6. Motivation (family, investment, relocation, first-time buyer)
+
+CONVERSATION STYLE:
+- Calm, friendly, professional
+- Short sentences
+- One question at a time
+- Interruptible and pause-friendly
+- Never rush the client
+- Never repeat the same question
+
+REFORMULATION RULES:
+Only reformulate if the message is unclear, ambiguous, or missing a critical detail.
+When reformulating:
+- Ask ONE short clarification question
+- Sound natural
+- Do NOT over-explain
+
+GOOD reformulation:
+"Just to make sure I understood correctly, are you looking to buy or to rent?"
+
+BAD reformulation:
+"Can you clarify your request?"
+
+IMPORTANT:
+If the client has not yet clearly stated whether they want to buy, sell, or rent,
+politely guide the conversation to identify this first.
+
+LANGUAGE:
+- English only
+- Canadian professional tone
+        `.trim(),
       },
     ]);
   }
@@ -103,8 +145,8 @@ async function askGPT(text, callSid) {
 
   const r = await openai.chat.completions.create({
     model: "gpt-4o-mini",
-    temperature: 0.5,
-    max_tokens: 35,
+    temperature: 0.4,
+    max_tokens: 45,
     messages: history,
   });
 
@@ -130,7 +172,7 @@ wss.on("connection", (ws) => {
 
       try {
         const audioUrl = await speak(
-          "Are you still there? I'm here if you have any questions.",
+          "Just checking in — I'm still here if you have any questions.",
           {
             audioDir: AUDIO_DIR,
             callSid,
