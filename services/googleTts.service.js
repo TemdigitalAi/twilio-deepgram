@@ -3,6 +3,7 @@
  *
  * Rôle :
  * - Transformer texte → audio via Google Cloud TTS
+ * - Ajouter des pauses humaines (SSML)
  * - Compatible Twilio Voice (MULAW / 8000 Hz)
  * - Compatible Render (credentials via env var)
  */
@@ -41,6 +42,37 @@ if (process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON) {
 const client = new textToSpeech.TextToSpeechClient();
 
 /* =========================
+   SSML HUMANIZER
+========================= */
+/**
+ * Transforme un texte normal en SSML naturel :
+ * - pauses après ponctuation
+ * - rythme conversationnel
+ * - respiration humaine
+ */
+function toSSML(text) {
+  if (!text || !text.trim()) {
+    return "<speak></speak>";
+  }
+
+  // Échapper les caractères interdits en SSML
+  const escaped = text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+
+  return `
+    <speak>
+      <prosody rate="medium" pitch="0st">
+        ${escaped
+          .replace(/([,.])/g, '$1 <break time="200ms"/>')
+          .replace(/([?!])/g, '$1 <break time="350ms"/>')}
+      </prosody>
+    </speak>
+  `;
+}
+
+/* =========================
    GOOGLE TTS FUNCTION
 ========================= */
 /**
@@ -61,7 +93,9 @@ async function googleTTS(text, audioDir, callSid, baseUrl) {
   const filepath = path.join(audioDir, filename);
 
   const request = {
-    input: { text },
+    input: {
+      ssml: toSSML(text), //  SSML HUMAIN
+    },
     voice: {
       languageCode: "en-US",
       name: "en-US-Neural2-F", // Voix féminine naturelle
@@ -69,7 +103,7 @@ async function googleTTS(text, audioDir, callSid, baseUrl) {
     audioConfig: {
       audioEncoding: "MULAW", // OBLIGATOIRE pour Twilio
       sampleRateHertz: 8000,  // Téléphonie
-      speakingRate: 1.05,     // Débit naturel
+      speakingRate: 1.0,      // SSML gère le rythme
     },
   };
 
