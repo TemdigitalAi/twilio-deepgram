@@ -1,16 +1,38 @@
-// celui apeller par lagence pour faire parler le bot
+/**
+ * services/tts.service.js
+ *
+ * Rôle :
+ * - Aura (Deepgram) = TTS principal (voix la plus humaine)
+ * - Google TTS = fallback sécurisé
+ */
 
-
-const { googleTTS } = require("./googleTts.service");
 const { deepgramTTS } = require("./deepgram.service");
+const { googleTTS } = require("./googleTts.service");
 
 async function speak(text, ctx) {
-  try {
-    return await googleTTS(text, ctx.audioDir, ctx.callSid, ctx.baseUrl);
-  } catch (e) {
-    console.warn("Google TTS failed → Deepgram fallback");
-    return await deepgramTTS(text, ctx.audioDir, ctx.callSid, ctx.baseUrl);
+  if (!text || !text.trim()) {
+    throw new Error("TTS: empty text");
   }
+
+  // 1️⃣ Aura (PRIORITÉ)
+  try {
+    return await deepgramTTS(
+      text,
+      ctx.audioDir,
+      ctx.callSid,
+      ctx.baseUrl
+    );
+  } catch (err) {
+    console.warn("Aura TTS failed → fallback Google", err.message);
+  }
+
+  // 2️⃣ Google TTS (FALLBACK)
+  return await googleTTS(
+    text,
+    ctx.audioDir,
+    ctx.callSid,
+    ctx.baseUrl
+  );
 }
 
 module.exports = { speak };
