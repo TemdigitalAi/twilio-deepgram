@@ -1,6 +1,10 @@
 /**
  * server.js - PRO VERSION: POWERFUL & HUMAN-LIKE
- * Features: Barge-in support, Inactivity detection, Ultra-concise responses.
+ * Architecture clean & modulaire
+ * - server.js = orchestration (Twilio, WebSocket, flow)
+ * - services/deepgram.service.js = STT Deepgram
+ * - services/googleTts.service.js = Google TTS
+ * - services/tts.service.js = Router TTS (Google → fallback)
  */
 
 require("dotenv").config();
@@ -10,9 +14,17 @@ const WebSocket = require("ws");
 const twilio = require("twilio");
 const fs = require("fs");
 const path = require("path");
-const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fetch(...args));
 const OpenAI = require("openai");
 
+/* =========================
+   IMPORT SERVICES
+========================= */
+const { createDeepgramSTT } = require("./services/deepgram.service");
+const { speak } = require("./services/tts.service");
+
+/* =========================
+   ENV
+========================= */
 const {
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
@@ -21,21 +33,30 @@ const {
   RENDER_EXTERNAL_URL,
 } = process.env;
 
+/* =========================
+   APP INIT
+========================= */
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: "/ws" });
+
 const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
+/* =========================
+   AUDIO FILES
+========================= */
 const AUDIO_DIR = path.join(__dirname, "audio");
 if (!fs.existsSync(AUDIO_DIR)) fs.mkdirSync(AUDIO_DIR);
 app.use("/audio", express.static(AUDIO_DIR));
 
 function baseUrl() {
-  return RENDER_EXTERNAL_URL.startsWith("http") ? RENDER_EXTERNAL_URL : `https://${RENDER_EXTERNAL_URL}`;
+  return RENDER_EXTERNAL_URL.startsWith("http")
+    ? RENDER_EXTERNAL_URL
+    : `https://${RENDER_EXTERNAL_URL}`;
 }
 
 /* =========================
@@ -57,18 +78,23 @@ app.post("/start", (req, res) => {
 });
 
 /* =========================
-   GPT LOGIC (POWERFUL & CONCISE)
+   GPT LOGIC
 ========================= */
 const conversationHistory = new Map();
-const lastActivity = new Map(); // For silence detection
 
 async function askGPT(text, callSid) {
   if (!conversationHistory.has(callSid)) {
     conversationHistory.set(callSid, [
       {
         role: "system",
-        content: "You are Ava, a high-performance real estate assistant. \n\nRULES:\n1. Be extremely concise: Respond naturally, Short answers, Pause-friendly,Interruptible.\n2. Be precise and impactful. No fluff.\n3. If interrupted, acknowledge the new input immediately.\n4. Language: English only."
-      }
+        content:
+          "You are Ava, a high-performance real estate assistant.\n\n" +
+          "RULES:\n" +
+          "1. Be extremely concise.\n" +
+          "2. Natural, interruptible answers.\n" +
+          "3. No fluff.\n" +
+          "4. English only.",
+      },
     ]);
   }
 
@@ -88,27 +114,6 @@ async function askGPT(text, callSid) {
 }
 
 /* =========================
-   DEEPGRAM TTS
-========================= */
-async function deepgramTTS(text, callSid) {
-  const file = `${callSid}-${Date.now()}.wav`;
-  const filePath = path.join(AUDIO_DIR, file);
-
-  const r = await fetch(
-    "https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=mulaw&sample_rate=8000&container=wav",
-    {
-      method: "POST",
-      headers: { Authorization: `Token ${DEEPGRAM_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
-    }
-  );
-
-  if (!r.ok) throw new Error(`TTS Failed: ${r.status}`);
-  fs.writeFileSync(filePath, Buffer.from(await r.arrayBuffer()));
-  return `${baseUrl()}/audio/${file}`;
-}
-
-/* =========================
    WEBSOCKET STREAMING
 ========================= */
 wss.on("connection", (ws) => {
@@ -117,87 +122,92 @@ wss.on("connection", (ws) => {
   let isProcessing = false;
   let silenceTimer = null;
 
-
-  // silence si personne parle durant appel 
-
+  /* ---------- SILENCE HANDLER ---------- */
   function resetSilenceTimer() {
     if (silenceTimer) clearTimeout(silenceTimer);
     silenceTimer = setTimeout(async () => {
-      if (callSid && !isProcessing) {
-        console.log("⏰ Silence detected, re-engaging...");
-        try {
-          const audioUrl = await deepgramTTS("Are you still there? I'm here if you have any questions.", callSid);
-          const vr = new twilio.twiml.VoiceResponse();
-          vr.play(audioUrl);
-          const connect = vr.connect();
-          connect.stream({ url: `${baseUrl().replace("https", "wss")}/ws` });
-          vr.pause({ length: 3600 });
-          await twilioClient.calls(callSid).update({ twiml: vr.toString() });
-        } catch (e) { console.error("Silence handler error", e.message); }
+      if (!callSid || isProcessing) return;
+
+      try {
+        const audioUrl = await speak(
+          "Are you still there? I'm here if you have any questions.",
+          {
+            audioDir: AUDIO_DIR,
+            callSid,
+            baseUrl: baseUrl(),
+          }
+        );
+
+        const vr = new twilio.twiml.VoiceResponse();
+        vr.play(audioUrl);
+        const connect = vr.connect();
+        connect.stream({ url: `${baseUrl().replace("https", "wss")}/ws` });
+        vr.pause({ length: 3600 });
+
+        await twilioClient.calls(callSid).update({ twiml: vr.toString() });
+      } catch (e) {
+        console.error("Silence handler error:", e.message);
       }
-    }, 10000); // 10 secondes of silence
+    }, 10000);
   }
 
-
-  // detection de la fin  parole via deepgram  
+  /* ---------- CONNECT DEEPGRAM (STT) ---------- */
   function connectDeepgram() {
-    const dgUrl = "wss://api.deepgram.com/v1/listen?model=nova-2&encoding=mulaw&sample_rate=8000&language=en-US&punctuate=true&interim_results=true&endpointing=300";
-    deepgramWs = new WebSocket(dgUrl, { headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` } });
+    deepgramWs = createDeepgramSTT(DEEPGRAM_API_KEY, async (transcript, isFinal) => {
+      if (!transcript) return;
 
-    deepgramWs.on("message", async (data) => {
+      resetSilenceTimer();
+
+      if (!isFinal || transcript.length < 2 || isProcessing) return;
+
+      isProcessing = true;
+      console.log("🎤 USER:", transcript);
+
       try {
-        const result = JSON.parse(data);
-        if (result.type === "Results") {
-          const transcript = result.channel.alternatives[0].transcript.trim();
-          
-          if (transcript.length > 0) resetSilenceTimer();
+        const reply = await askGPT(transcript, callSid);
+        console.log("🤖 AGENT:", reply);
 
-          if (result.speech_final && transcript.length > 1 && !isProcessing) {
-            isProcessing = true;
-            console.log("🎤 USER:", transcript);
+        const audioUrl = await speak(reply, {
+          audioDir: AUDIO_DIR,
+          callSid,
+          baseUrl: baseUrl(),
+        });
 
-            try {
-              const reply = await askGPT(transcript, callSid);
-              console.log("🤖 AGENT:", reply);
+        const vr = new twilio.twiml.VoiceResponse();
+        vr.play(audioUrl);
+        const connect = vr.connect();
+        connect.stream({ url: `${baseUrl().replace("https", "wss")}/ws` });
+        vr.pause({ length: 3600 });
 
-              const audioUrl = await deepgramTTS(reply, callSid);
-
-              const vr = new twilio.twiml.VoiceResponse();
-
-              // BARGE-IN: If the user speaks during this play, Twilio will stop it
-              vr.play(audioUrl);
-              const connect = vr.connect();
-              connect.stream({ url: `${baseUrl().replace("https", "wss")}/ws` });
-              vr.pause({ length: 3600 });
-
-              await twilioClient.calls(callSid).update({ twiml: vr.toString() });
-            } catch (err) {
-              console.error("Error:", err.message);
-            } finally {
-              isProcessing = false;
-            }
-          }
-        }
-      } catch (err) { console.error("DG Error:", err.message); }
+        await twilioClient.calls(callSid).update({ twiml: vr.toString() });
+      } catch (err) {
+        console.error("Agent error:", err.message);
+      } finally {
+        isProcessing = false;
+      }
     });
   }
 
+  /* ---------- TWILIO EVENTS ---------- */
   ws.on("message", (msg) => {
     const data = JSON.parse(msg);
+
     if (data.event === "start") {
       callSid = data.start.callSid;
       console.log("📞 Call Connected:", callSid);
       connectDeepgram();
       resetSilenceTimer();
     }
+
     if (data.event === "media" && deepgramWs?.readyState === WebSocket.OPEN) {
       deepgramWs.send(Buffer.from(data.media.payload, "base64"));
     }
+
     if (data.event === "stop") {
       if (silenceTimer) clearTimeout(silenceTimer);
-      console.log("📞 Call Ended");
       conversationHistory.delete(callSid);
       deepgramWs?.close();
+      console.log("📞 Call Ended");
     }
   });
 
@@ -207,6 +217,9 @@ wss.on("connection", (ws) => {
   });
 });
 
+/* =========================
+   SERVER START
+========================= */
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`✅ POWERFUL AGENT ONLINE ON PORT ${PORT}`);
